@@ -1191,6 +1191,7 @@ def get_cached_dataset_tulu(
     hf_entity: Optional[str] = None,
     dataset_local_cache_dir: str = "local_dataset_cache",
     dataset_skip_cache: bool = False,
+    use_last_n: bool = False,
 ) -> Dataset:
     dcs = []
     if dataset_config_hash is None:
@@ -1223,7 +1224,20 @@ def get_cached_dataset_tulu(
                 new_range = int(frac_or_num_samples)
             else:
                 new_range = int(frac_or_num_samples * len(dataset_config.dataset))
-            dataset_config.update_range(new_range)
+            
+            # Handle selecting last N samples if requested
+            if use_last_n:
+                total_len = len(dataset_config.dataset)
+                if new_range > total_len:
+                    new_range = total_len
+                # Instead of range(new_range), use range(total_len - new_range, total_len)
+                start_idx = total_len - new_range
+                dataset_config.dataset = dataset_config.dataset.select(range(start_idx, total_len))
+                # We've already selected the range, so set dataset_range to the length
+                dataset_config.dataset_range = new_range
+            else:
+                dataset_config.update_range(new_range)
+            
             dcs.append(dataset_config)
         dataset_config_hash = compute_config_hash(dcs, tc)
     if dataset_cache_mode == "local":

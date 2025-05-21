@@ -56,7 +56,7 @@ from argparse import Namespace
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from queue import Empty, Queue
-from typing import Callable, Dict, Iterator, List, Literal, Optional
+from typing import Callable, Dict, Iterator, List, Literal, Optional, Any
 
 import numpy as np
 import pandas as pd
@@ -144,6 +144,8 @@ class Args:
     """Whether to skip the cache."""
     shuffle_eval_dataset: bool = False
     """Whether to shuffle the evaluation dataset."""
+    use_last_n_eval_samples: bool = True
+    """Whether to use the last N samples from each evaluation dataset instead of the first N."""
     max_token_length: int = 512
     """The maximum token length to use for the dataset"""
     max_prompt_token_length: int = 256
@@ -1483,6 +1485,7 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
             dataset_config_hash=args.dataset_config_eval_hash,
             dataset_local_cache_dir=args.dataset_local_cache_dir,
             dataset_skip_cache=args.dataset_skip_cache,
+            use_last_n=args.use_last_n_eval_samples,
         )
         # if args.shuffle_eval_dataset:
         #     eval_dataset = eval_dataset.shuffle(seed=args.seed)
