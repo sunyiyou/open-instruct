@@ -1220,9 +1220,19 @@ def data_preparation_thread(
             # In GRPO, if the std of grouped rewards is 0, then there is zero gradient for the batch
             # of args.num_samples_per_prompt_rollout responses, so we need to filter out those batches
             non_zero_std_mask = scores_per_prompt.std(axis=-1) != 0
-            real_batch_size_ratio = non_zero_std_mask.sum() * args.num_samples_per_prompt_rollout / len(scores)
-            expanded_mask = np.repeat(non_zero_std_mask, args.num_samples_per_prompt_rollout)
-            non_zero_gradient_index = np.where(expanded_mask)[0]
+            
+            # Check if all scores are zero or if non_zero_std_mask is all False
+            if np.all(scores == 0) or not np.any(non_zero_std_mask):
+                print("Warning: All scores are zero or all std values are zero. Keeping only a few random samples.")
+                # Just keep a few random samples instead of the whole batch
+                num_samples_to_keep = min(args.per_device_train_batch_size * 2, len(scores))
+                non_zero_gradient_index = np.random.choice(len(scores), size=num_samples_to_keep, replace=False)
+                real_batch_size_ratio = num_samples_to_keep / len(scores)
+            else:
+                real_batch_size_ratio = non_zero_std_mask.sum() * args.num_samples_per_prompt_rollout / len(scores)
+                expanded_mask = np.repeat(non_zero_std_mask, args.num_samples_per_prompt_rollout)
+                non_zero_gradient_index = np.where(expanded_mask)[0]
+                
             advantages = advantages[non_zero_gradient_index]
             scores = scores[non_zero_gradient_index]
             responses = [responses[i] for i in non_zero_gradient_index]
@@ -1452,20 +1462,28 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
     train_dataset = train_dataset.shuffle(seed=args.seed)
     eval_dataset = None
     if len(args.dataset_mixer_eval_list) > 0:
+        # Create separate transform_fn_args for evaluation without length constraints
+        eval_transform_fn_args = [
+            {},
+            {
+                # No max_token_length or max_prompt_token_length to disable filtering
+                "need_contain_labels": True
+            },
+        ]
         eval_dataset = get_cached_dataset_tulu(
             args.dataset_mixer_eval_list,
             args.dataset_mixer_eval_list_splits,
             tc,
             args.dataset_transform_fn,
-            transform_fn_args,
+            eval_transform_fn_args,
             hf_entity=args.hf_entity,
             dataset_cache_mode=args.dataset_cache_mode,
             dataset_config_hash=args.dataset_config_eval_hash,
             dataset_local_cache_dir=args.dataset_local_cache_dir,
             dataset_skip_cache=args.dataset_skip_cache,
         )
-        if args.shuffle_eval_dataset:
-            eval_dataset = eval_dataset.shuffle(seed=args.seed)
+        # if args.shuffle_eval_dataset:
+        #     eval_dataset = eval_dataset.shuffle(seed=args.seed)
     if args.cache_dataset_only:
         return
 
@@ -1544,7 +1562,7 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
     evaluation_inference_results_Q = Queue(maxsize=1)
     packed_sequences_Q = Queue(maxsize=1)
     queries_prompt_Q = Queue(maxsize=1)
-    num_eval_samples = 32
+    num_eval_samples = 128
 
     eval_prompt_token_ids = None
     eval_ground_truths = None
