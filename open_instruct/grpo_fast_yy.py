@@ -1564,7 +1564,7 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
     evaluation_inference_results_Q = Queue(maxsize=1)
     packed_sequences_Q = Queue(maxsize=1)
     queries_prompt_Q = Queue(maxsize=1)
-    num_eval_samples = 128
+    num_eval_samples = 256
 
     eval_prompt_token_ids = None
     eval_ground_truths = None
@@ -1588,14 +1588,15 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
             # Tag this range of samples with their source dataset
             sources.extend([dataset_name] * num_samples)
             start_idx += num_samples
-            
+        
+        assert len(sources) == len(eval_dataset)
         # Handle case where total tagged samples doesn't match dataset length
-        if len(sources) < len(eval_dataset):
-            print(f"Warning: Tagged {len(sources)} samples but dataset has {len(eval_dataset)} samples")
-            # Fill remaining with last dataset
-            if len(args.dataset_mixer_eval_list) >= 2:
-                last_dataset = args.dataset_mixer_eval_list[-2]  # Last dataset name
-                sources.extend([last_dataset] * (len(eval_dataset) - len(sources)))
+        # if len(sources) < len(eval_dataset):
+        #     print(f"Warning: Tagged {len(sources)} samples but dataset has {len(eval_dataset)} samples")
+        #     # Fill remaining with last dataset
+        #     if len(args.dataset_mixer_eval_list) >= 2:
+        #         last_dataset = args.dataset_mixer_eval_list[-2]  # Last dataset name
+        #         sources.extend([last_dataset] * (len(eval_dataset) - len(sources)))
         
         # Add column to dataset - this preserves ordering even with shuffling
         eval_dataset = eval_dataset.add_column("__dataset_source__", sources)
