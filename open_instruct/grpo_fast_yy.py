@@ -1308,7 +1308,7 @@ def data_preparation_thread(
             "scores": np.array(scores).mean(),
             "real_batch_size_ratio": real_batch_size_ratio,
             "unsolved_batch_size_ratio": unsolved_batch_size_ratio,
-            "packed_ratio": len(packed_sequences.query_responses) / (len(responses)+1e-10),
+            "packed_ratio": len(packed_sequences.query_responses) / len(responses),
             "val/sequence_lengths": sequence_lengths.mean(),
             "val/sequence_lengths_min": sequence_lengths.min(),
             "val/sequence_lengths_max": sequence_lengths.max(),
@@ -1544,14 +1544,51 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
     evaluation_inference_results_Q = Queue(maxsize=1)
     packed_sequences_Q = Queue(maxsize=1)
     queries_prompt_Q = Queue(maxsize=1)
-    num_eval_samples = 128
+    num_eval_samples = 32
 
     eval_prompt_token_ids = None
     eval_ground_truths = None
+    eval_dataset_names = None
+    eval_original_sources = None
     if eval_dataset is not None:
-        eval_prompt_token_ids = eval_dataset[:num_eval_samples][INPUT_IDS_PROMPT_KEY]
-        eval_ground_truths = eval_dataset[:num_eval_samples][GROUND_TRUTHS_KEY]
-        eval_dataset_names = eval_dataset[:num_eval_samples][DATASET_SOURCE_KEY]
+        # Add a "__dataset_source__" column to track the original dataset for each sample
+        sources = []
+        start_idx = 0
+        # Loop through each dataset in the mixer and tag its samples
+        for i in range(0, len(args.dataset_mixer_eval_list), 2):
+            dataset_name = args.dataset_mixer_eval_list[i]
+            frac_or_num_samples = args.dataset_mixer_eval_list[i+1]
+            
+            # Convert to number of samples
+            if "." in frac_or_num_samples:
+                num_samples = int(float(frac_or_num_samples) * len(eval_dataset))
+            else:
+                num_samples = int(frac_or_num_samples)
+            
+            # Tag this range of samples with their source dataset
+            sources.extend([dataset_name] * num_samples)
+            start_idx += num_samples
+            
+        # Handle case where total tagged samples doesn't match dataset length
+        if len(sources) < len(eval_dataset):
+            print(f"Warning: Tagged {len(sources)} samples but dataset has {len(eval_dataset)} samples")
+            # Fill remaining with last dataset
+            if len(args.dataset_mixer_eval_list) >= 2:
+                last_dataset = args.dataset_mixer_eval_list[-2]  # Last dataset name
+                sources.extend([last_dataset] * (len(eval_dataset) - len(sources)))
+        
+        # Add column to dataset - this preserves ordering even with shuffling
+        eval_dataset = eval_dataset.add_column("__dataset_source__", sources)
+        
+        # Now select samples for evaluation
+        eval_dataset_subset = eval_dataset[:num_eval_samples]
+        
+        # Extract data with original source information preserved
+        eval_prompt_token_ids = eval_dataset_subset[INPUT_IDS_PROMPT_KEY]
+        eval_ground_truths = eval_dataset_subset[GROUND_TRUTHS_KEY]
+        eval_dataset_names = eval_dataset_subset[DATASET_SOURCE_KEY]  # For verifier
+        eval_original_sources = eval_dataset_subset["__dataset_source__"]  # Original dataset names
+    
     thread = threading.Thread(
         target=vllm_generate_thread,
         args=(
@@ -1738,6 +1775,7 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
                     eval_ground_truths,
                     eval_dataset_names,
                     eval_finish_reasons,
+                    eval_original_sources,  # Pass the original sources
                 )
                 eval_reward_metrics = {f"eval/{key}": val for key, val in eval_reward_metrics.items()}
                 
@@ -1745,30 +1783,33 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
                 eval_dataset_metrics = defaultdict(list)
                 eval_dataset_indices = defaultdict(list)
                 
-                # Helper function for consistent display names
-                def get_display_name(ds):
-                    return ds.split('/')[-1] if '/' in ds else ds
+                # Track which dataset each sample comes from using the original sources
+                for i, original_dataset in enumerate(eval_original_sources):
+                    eval_dataset_indices[original_dataset].append(i)
                 
-                for i, ds in enumerate(eval_dataset_names):
-                    # Use original dataset name, not the verifier name
-                    eval_dataset_indices[ds].append(i)
-                
-                # Calculate per-dataset metrics using simplified dataset names
-                for ds, indices in eval_dataset_indices.items():
-                    display_name = get_display_name(ds)
-                    ds_scores = [eval_scores[i] for i in indices]
-                    ds_sequence_lengths = [eval_sequence_lengths[i] for i in indices]
-                    if ds_scores:
-                        eval_reward_metrics[f"eval/{display_name}/scores"] = np.array(ds_scores).mean()
-                        eval_reward_metrics[f"eval/{display_name}/sequence_lengths"] = np.array(ds_sequence_lengths).mean() 
-                        eval_reward_metrics[f"eval/{display_name}/sample_count"] = len(ds_scores)
-                        # Calculate success rate for this dataset
-                        if args.apply_verifiable_reward:
-                            max_score = args.verification_reward
-                            if args.apply_r1_style_format_reward and args.additive_format_reward:
-                                max_score += args.r1_style_format_reward
-                            success_rate = np.mean(np.array(ds_scores) == max_score)
-                            eval_reward_metrics[f"eval/{display_name}/success_rate"] = success_rate
+                # Calculate per-dataset metrics
+                for dataset_name, indices in eval_dataset_indices.items():
+                    dataset_display_name = dataset_name.split('/')[-1]  # Just use last part of path for cleaner names
+                    dataset_scores = [eval_scores[i] for i in indices]
+                    dataset_seq_lengths = [eval_sequence_lengths[i] for i in indices]
+                    
+                    # Add dataset-specific metrics
+                    dataset_metrics = {
+                        f"eval/{dataset_display_name}/scores": np.mean(dataset_scores),
+                        f"eval/{dataset_display_name}/sequence_lengths": np.mean(dataset_seq_lengths),
+                        f"eval/{dataset_display_name}/sample_count": len(indices)
+                    }
+                    
+                    # Calculate success rate if using verifiable reward
+                    if args.apply_verifiable_reward:
+                        max_score = args.verification_reward
+                        if args.apply_r1_style_format_reward and args.additive_format_reward:
+                            max_score += args.r1_style_format_reward
+                        success_rate = sum(score == max_score for score in dataset_scores) / len(dataset_scores)
+                        dataset_metrics[f"eval/{dataset_display_name}/success_rate"] = success_rate
+                    
+                    # Add dataset metrics to overall metrics
+                    eval_reward_metrics.update(dataset_metrics)
                 
                 eval_metrics = {
                     "eval/scores": np.array(eval_scores).mean(),
@@ -1787,20 +1828,19 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
                 table["response"] = [item.replace(tokenizer.pad_token, "") for item in table["response"]]
                 table["scores"] = eval_scores
                 table["ground_truth"] = eval_ground_truths
-                table["dataset"] = eval_dataset_names
+                table["dataset"] = [s for s in eval_original_sources]  # Add dataset source to table
                 df = pd.DataFrame(table)
                 
                 if args.with_tracking:
                     # Log the full table
                     wandb.log({"sample_completions": wandb.Table(dataframe=df)})
                     
-                    # Create per-dataset tables with simplified dataset names
-                    for ds, indices in eval_dataset_indices.items():
+                    # Create per-dataset tables
+                    for dataset_name, indices in eval_dataset_indices.items():
                         if indices:  # Skip empty datasets
+                            dataset_display_name = dataset_name.split('/')[-1]
                             ds_df = df.iloc[indices]
-                            # Extract a cleaner dataset name for display
-                            display_name = ds.split('/')[-1] if '/' in ds else ds
-                            wandb.log({f"sample_completions/{display_name}": wandb.Table(dataframe=ds_df)})
+                            wandb.log({f"sample_completions/{dataset_display_name}": wandb.Table(dataframe=ds_df)})
                 else:
                     print_rich_table(df.iloc[:1])
                 del table
@@ -1867,6 +1907,7 @@ if __name__ == "__main__":
         ground_truths: List[str],
         datasets: List[str],
         finish_reasons: List[str],
+        eval_original_sources: Optional[List[str]] = None,
     ) -> List[float]:
         scores = [0] * len(decoded_responses)
         metrics = {}
@@ -1875,15 +1916,18 @@ if __name__ == "__main__":
         dataset_scores = defaultdict(list)
         dataset_indices = defaultdict(list)
         
-        # Function to create a clean display name for metrics
-        def get_display_name(ds):
-            return ds.split('/')[-1] if '/' in ds else ds
-        
-        # Keep track of which response belongs to which dataset
-        for i, ds in enumerate(datasets):
-            # Use original dataset name for metrics, not verifier name
-            dataset_indices[ds].append(i)
-            
+        # Map each response to its dataset source
+        for i, dataset_source in enumerate(datasets):
+            # For evaluation samples, use the original source from eval_original_sources
+            # which will be passed in during evaluation
+            if eval_original_sources is not None and i < len(eval_original_sources):
+                original_dataset = eval_original_sources[i]
+            # Otherwise use the dataset source provided (may be just domain names like 'math')
+            else:
+                original_dataset = dataset_source
+                
+            dataset_indices[original_dataset].append(i)
+
         if args.apply_r1_style_format_reward:
             with Timer("[Data Preparation Thread] Calculating rewards -- 🧮 Calculating format reward"):
                 format_scores = soft_format_reward_func(decoded_responses, args.r1_style_format_reward)
@@ -1893,11 +1937,11 @@ if __name__ == "__main__":
                     scores[i] = format_scores[i] + scores[i]
                 metrics["val/format_scores"] = np.array(format_scores).mean()
                 
-                # Track format scores per dataset
+                # Calculate per-dataset format scores
                 for ds, indices in dataset_indices.items():
-                    display_name = get_display_name(ds)
                     ds_format_scores = [format_scores[i] for i in indices]
                     if ds_format_scores:
+                        display_name = ds.split('/')[-1]
                         metrics[f"val/{display_name}/format_scores"] = np.array(ds_format_scores).mean()
 
         if args.apply_verifiable_reward:
@@ -1918,34 +1962,29 @@ if __name__ == "__main__":
                         scores[i] = verifiable_rewards[i] if format_scores[i] == 1 else 0
                     else:
                         scores[i] = verifiable_rewards[i]
-                    
-                    # Use original dataset source name for metrics tracking 
-                    dataset_scores[datasets[i]].append(verifiable_rewards[i])
-                    
                 np_verifiable_rewards = np.array(verifiable_rewards)
                 metrics["objective/verifiable_reward"] = np_verifiable_rewards.mean()
                 metrics["objective/verifiable_correct_rate"] = (np_verifiable_rewards > 0.0).mean()
                 
-                # Add per-dataset metrics using simplified dataset names
-                for ds, ds_scores in dataset_scores.items():
-                    display_name = get_display_name(ds)
-                    np_ds_scores = np.array(ds_scores)
-                    metrics[f"val/{display_name}/verifiable_reward"] = np_ds_scores.mean()
-                    metrics[f"val/{display_name}/correct_rate"] = (np_ds_scores > 0.0).mean()
-                    metrics[f"val/{display_name}/sample_count"] = len(ds_scores)
+                # Per-dataset verifiable rewards
+                for ds, indices in dataset_indices.items():
+                    ds_verifiable_rewards = [verifiable_rewards[i] for i in indices]
+                    if ds_verifiable_rewards:
+                        display_name = ds.split('/')[-1]
+                        ds_np_rewards = np.array(ds_verifiable_rewards)
+                        metrics[f"objective/{display_name}/verifiable_reward"] = ds_np_rewards.mean()
+                        metrics[f"objective/{display_name}/verifiable_correct_rate"] = (ds_np_rewards > 0.0).mean()
                 
-                # Instead of using per_func_rewards for dataset metrics, we'll use dataset_scores
-                # Track function rewards separately if needed
-                verifier_metrics = defaultdict(list)
+                # reshuffle around per_func rewards
+                per_func_lists = defaultdict(list)
                 for reward_dict in per_func_rewards:
                     for key, value in reward_dict.items():
-                        verifier_metrics[key].append(value)
-                
-                # Log metrics by verifier type too (these won't show in dataset-specific metrics)
-                for key, value in verifier_metrics.items():
+                        per_func_lists[key].append(value)
+                # log per function rewards
+                for key, value in per_func_lists.items():
                     np_value = np.array(value)
-                    metrics[f"verifier/{key}_reward"] = np_value.mean()
-                    metrics[f"verifier/{key}_correct_rate"] = (np_value > 0.0).mean()
+                    metrics[f"objective/{key}_reward"] = np_value.mean()
+                    metrics[f"objective/{key}_correct_rate"] = (np_value > 0.0).mean()
 
         # this gets applied at the very end since it replaces (rather than adds to) the existing reward.
         if args.non_stop_penalty:
@@ -1954,21 +1993,20 @@ if __name__ == "__main__":
                 for i in range(len(finish_reasons)):
                     if finish_reasons[i] != "stop":
                         scores[i] = args.non_stop_penalty_value
-                
-                # Track non-stop penalty per dataset
-                for ds, indices in dataset_indices.items():
-                    display_name = get_display_name(ds)
-                    ds_finish_reasons = [finish_reasons[i] for i in indices]
-                    if ds_finish_reasons:
-                        ds_stop_rate = sum(int(reason == "stop") for reason in ds_finish_reasons) / len(ds_finish_reasons)
-                        metrics[f"val/{display_name}/stop_rate"] = ds_stop_rate
 
-        # Add final per-dataset scores with simplified dataset names
+        # Add final per-dataset scores with clean dataset names
         for ds, indices in dataset_indices.items():
-            display_name = get_display_name(ds)
+            display_name = ds.split('/')[-1]
             ds_scores = [scores[i] for i in indices]
             if ds_scores:
                 metrics[f"val/{display_name}/scores"] = np.array(ds_scores).mean()
+                # Calculate success rate for this dataset
+                if args.apply_verifiable_reward:
+                    max_score = args.verification_reward
+                    if args.apply_r1_style_format_reward and args.additive_format_reward:
+                        max_score += args.r1_style_format_reward
+                    success_rate = sum(score == max_score for score in ds_scores) / len(ds_scores)
+                    metrics[f"val/{display_name}/success_rate"] = success_rate
                 
         return scores, metrics
 
