@@ -284,6 +284,8 @@ class Args:
     """The wandb's project name"""
     wandb_entity: Optional[str] = None
     """The entity (team) of wandb's project"""
+    with_local_tracking: bool = False
+    """If toggled, evaluation results will be saved locally as CSV files"""
     push_to_hub: bool = True
     """Whether to upload the saved model to huggingface"""
     hf_entity: Optional[str] = None
@@ -1848,6 +1850,18 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
                 table["ground_truth"] = eval_ground_truths
                 table["dataset"] = [s for s in eval_original_sources]  # Add dataset source to table
                 df = pd.DataFrame(table)
+                
+                # Save evaluation results locally
+                if args.with_local_tracking:
+                    os.makedirs(os.path.join(args.output_dir, "eval_results"), exist_ok=True)
+                    
+                    # Save per-dataset dataframes
+                    for dataset_name, indices in eval_dataset_indices.items():
+                        if indices:  # Skip empty datasets
+                            dataset_display_name = dataset_name.split('/')[-1]
+                            ds_df = df.iloc[indices]
+                            dataset_df_path = os.path.join(args.output_dir, "eval_results", f"eval_step_{training_step}_{dataset_display_name}.csv")
+                            ds_df.to_csv(dataset_df_path, index=False)
                 
                 if args.with_tracking:
                     # Log the full table
