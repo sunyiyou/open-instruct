@@ -1821,13 +1821,13 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
                         f"eval/{dataset_display_name}/sample_count": len(indices)
                     }
                     
-                    # Calculate success rate if using verifiable reward
-                    if args.apply_verifiable_reward:
-                        max_score = args.verification_reward
-                        if args.apply_r1_style_format_reward and args.additive_format_reward:
-                            max_score += args.r1_style_format_reward
-                        success_rate = sum(score == max_score for score in dataset_scores) / len(dataset_scores)
-                        dataset_metrics[f"eval/{dataset_display_name}/success_rate"] = success_rate
+                    # # Calculate success rate if using verifiable reward
+                    # if args.apply_verifiable_reward:
+                    #     max_score = args.verification_reward
+                    #     if args.apply_r1_style_format_reward and args.additive_format_reward:
+                    #         max_score += args.r1_style_format_reward
+                    #     success_rate = sum(score == max_score for score in dataset_scores) / len(dataset_scores)
+                    #     dataset_metrics[f"eval/{dataset_display_name}/success_rate"] = success_rate
                     
                     # Add dataset metrics to overall metrics
                     eval_reward_metrics.update(dataset_metrics)
@@ -2038,8 +2038,8 @@ if __name__ == "__main__":
                     max_score = args.verification_reward
                     if args.apply_r1_style_format_reward and args.additive_format_reward:
                         max_score += args.r1_style_format_reward
-                    success_rate = sum(score == max_score for score in ds_scores) / len(ds_scores)
-                    metrics[f"val/{display_name}/success_rate"] = success_rate
+                    # success_rate = sum(score == max_score for score in ds_scores) / len(ds_scores)
+                    # metrics[f"val/{display_name}/success_rate"] = success_rate
                 
         return scores, metrics
 
