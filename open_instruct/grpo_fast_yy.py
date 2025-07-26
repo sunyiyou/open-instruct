@@ -646,8 +646,8 @@ class PolicyTrainerRayProcess(RayProcess):
             revision=model_config.model_revision,
             torch_dtype=torch.bfloat16,
             attn_implementation="flash_attention_2",
-            use_cache=False,
         )
+        self.policy.config.use_cache = False
         disable_dropout_in_model(self.policy)
         self.policy.gradient_checkpointing_enable()
         # AdamOptimizer = DeepSpeedCPUAdam if self.adam_offload else FusedAdam
@@ -715,8 +715,8 @@ class PolicyTrainerRayProcess(RayProcess):
             revision=model_config.model_revision,
             torch_dtype=torch.bfloat16,
             attn_implementation="flash_attention_2",
-            use_cache=False,
         )
+        self.ref_policy.config.use_cache = False
         disable_dropout_in_model(self.ref_policy)
         self.ref_policy, *_ = deepspeed.initialize(model=self.ref_policy, config=ds_config)
         self.ref_policy.eval()
