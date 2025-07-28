@@ -302,6 +302,24 @@ CHAT_TEMPLATES = {
         "{% endif %}"
         "{% endfor %}"
     ),
+    "gemma_simple_chat_postpend_think": (
+        "<bos><start_of_turn>user\n"
+        "A conversation between User and Assistant. "
+        "The user asks a question, and the Assistant solves it. "
+        "The assistant first thinks about the reasoning process in "
+        "the mind and then provides the user with the answer. "
+        "The reasoning process and answer are enclosed within <think> </think> "
+        "and <answer> </answer> tags, respectively, "
+        "i.e., <think> reasoning process here </think> "
+        "<answer> answer here </answer>."
+        "\n\n"
+        "{% for message in messages %}"
+        "{{ '\n\n' if not loop.first else '' }}"
+        "{{ message['role'].capitalize() + ': ' + message['content'] + '\n' }}"
+        "{% if loop.last and add_generation_prompt %}"
+        "{{ '<end_of_turn>\n<start_of_turn>model\n<think>' }}"
+        "{% endif %}"
+    ),
 }
 # flake8: noqa
 
