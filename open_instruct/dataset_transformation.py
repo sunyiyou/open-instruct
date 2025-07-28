@@ -319,6 +319,7 @@ CHAT_TEMPLATES = {
         "{% if loop.last and add_generation_prompt %}"
         "{{ '<end_of_turn>\n<start_of_turn>model\n<think>' }}"
         "{% endif %}"
+        "{% endfor %}"
     ),
 }
 # flake8: noqa
