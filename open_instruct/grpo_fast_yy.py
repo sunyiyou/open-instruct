@@ -1565,7 +1565,7 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
     evaluation_inference_results_Q = Queue(maxsize=1)
     packed_sequences_Q = Queue(maxsize=1)
     queries_prompt_Q = Queue(maxsize=1)
-    num_eval_samples = 256
+    num_eval_samples = 512
 
     eval_prompt_token_ids = None
     eval_ground_truths = None
