@@ -206,6 +206,10 @@ class Args:
     """List of strings that stop the generation when they are generated.
     The returned output will not contain the stop strings."""
 
+    # Model Configuration
+    attn_implementation: str = 'eager'
+    """The attention implementation to use for the model. Options: 'eager', 'sdpa', 'flash_attention_2'"""
+
     # Algorithm
     async_mode: bool = True
     """Whether to run the generation in async mode which learns from the second latest policy like Cleanba (https://arxiv.org/abs/2310.00036)"""
@@ -645,6 +649,7 @@ class PolicyTrainerRayProcess(RayProcess):
             model_config.model_name_or_path,
             revision=model_config.model_revision,
             torch_dtype=torch.bfloat16,
+            attn_implementation=args.attn_implementation,
         )
         self.policy.config.use_cache = False
         disable_dropout_in_model(self.policy)
@@ -713,6 +718,7 @@ class PolicyTrainerRayProcess(RayProcess):
             model_config.model_name_or_path,
             revision=model_config.model_revision,
             torch_dtype=torch.bfloat16,
+            attn_implementation=args.attn_implementation,
         )
         self.ref_policy.config.use_cache = False
         disable_dropout_in_model(self.ref_policy)
