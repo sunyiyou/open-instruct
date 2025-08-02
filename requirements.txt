@@ -17,11 +17,13 @@ aiohttp==3.12.9
     #   vllm
 aiohttp-cors==0.8.1
     # via ray
+    # via ray
 aiosignal==1.3.2
     # via aiohttp
 airportsdata==20250523
     # via outlines
 annotated-types==0.7.0
+    # via pydantic
     # via pydantic
 antlr4-python3-runtime==4.11.0
     # via open-instruct
@@ -33,6 +35,7 @@ anyio==4.9.0
     #   watchfiles
 astor==0.8.1
     # via depyf
+    # via depyf
 async-timeout==5.0.1 ; python_full_version < '3.11'
     # via aiohttp
 attrs==25.3.0
@@ -42,6 +45,7 @@ attrs==25.3.0
     #   referencing
 autoflake==2.3.1
 babel==2.17.0
+    # via mkdocs-material
     # via mkdocs-material
 backrefs==5.8
     # via mkdocs-material
@@ -90,6 +94,15 @@ colorama==0.4.6
     #   pytest
     #   tqdm
     #   uvicorn
+    # via
+    #   click
+    #   colorful
+    #   mkdocs
+    #   mkdocs-material
+    #   nvitop
+    #   pytest
+    #   tqdm
+    #   uvicorn
 colorful==0.5.6
     # via ray
 compressed-tensors==0.10.1
@@ -101,6 +114,7 @@ cuda-bindings==12.9.0
 cuda-python==12.9.0
     # via flashinfer-python
 cupy-cuda12x==13.4.1 ; sys_platform != 'darwin'
+    # via ray
     # via ray
 cycler==0.12.1
     # via matplotlib
@@ -116,22 +130,39 @@ deprecated==1.2.18
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
     #   opentelemetry-semantic-conventions
+    # via open-instruct
+deprecated==1.2.18
+    # via
+    #   opentelemetry-api
+    #   opentelemetry-exporter-otlp-proto-grpc
+    #   opentelemetry-exporter-otlp-proto-http
+    #   opentelemetry-semantic-conventions
 depyf==0.18.0
+    # via vllm
     # via vllm
 dill==0.3.8
     # via
     #   datasets
     #   depyf
     #   multiprocess
+    # via
+    #   datasets
+    #   depyf
+    #   multiprocess
 diskcache==5.6.3
+    # via outlines
     # via outlines
 distlib==0.3.9
     # via virtualenv
+    # via virtualenv
 distro==1.9.0
+    # via openai
     # via openai
 dnspython==2.7.0
     # via email-validator
+    # via email-validator
 docker==7.1.0
+    # via beaker-py
     # via beaker-py
 docker-pycreds==0.4.0
     # via wandb
@@ -151,6 +182,7 @@ fastapi==0.115.12
     #   open-instruct
     #   vllm
 fastapi-cli==0.0.7
+    # via fastapi
     # via fastapi
 fastrlock==0.8.3 ; sys_platform != 'darwin'
     # via cupy-cuda12x
@@ -183,7 +215,9 @@ gguf==0.17.0
     # via vllm
 ghp-import==2.1.0
     # via mkdocs
+    # via mkdocs
 gitdb==4.0.12
+    # via gitpython
     # via gitpython
 gitpython==3.1.44
     # via wandb
@@ -214,6 +248,7 @@ hjson==3.1.0
 httpcore==1.0.9
     # via httpx
 httptools==0.6.4
+    # via uvicorn
     # via uvicorn
 httpx==0.28.1
     # via
@@ -298,6 +333,7 @@ markdown==3.8
 markdown-include==0.8.1
 markdown-it-py==3.0.0
     # via rich
+    # via rich
 markupsafe==3.0.2
     # via
     #   jinja2
@@ -307,7 +343,9 @@ matplotlib==3.10.3
     # via open-instruct
 mccabe==0.7.0
     # via flake8
+    # via flake8
 mdurl==0.1.2
+    # via markdown-it-py
     # via markdown-it-py
 mergedeep==1.3.4
     # via
@@ -317,14 +355,20 @@ mistral-common==1.5.6
     # via vllm
 mkdocs==1.6.1
     # via mkdocs-material
+    # via mkdocs-material
 mkdocs-get-deps==0.2.0
     # via mkdocs
 mkdocs-material==9.6.14
 mkdocs-material-extensions==1.3.1
     # via mkdocs-material
+    # via mkdocs-material
 mpmath==1.3.0
     # via sympy
+    # via sympy
 msgpack==1.1.0
+    # via
+    #   deepspeed
+    #   ray
     # via
     #   deepspeed
     #   ray
@@ -351,6 +395,9 @@ ninja==1.11.1.4
     #   vllm
     #   xgrammar
 nltk==3.9.1
+    # via open-instruct
+numba==0.61.2
+    # via vllm
     # via open-instruct
 numba==0.61.2
     # via vllm
@@ -429,7 +476,44 @@ openai==1.84.0
     #   vllm
 opencensus==0.11.4
     # via ray
+    # via ray
 opencensus-context==0.1.3
+    # via opencensus
+opencv-python-headless==4.11.0.86
+    # via
+    #   mistral-common
+    #   vllm
+opentelemetry-api==1.26.0
+    # via
+    #   opentelemetry-exporter-otlp-proto-grpc
+    #   opentelemetry-exporter-otlp-proto-http
+    #   opentelemetry-sdk
+    #   opentelemetry-semantic-conventions
+    #   vllm
+opentelemetry-exporter-otlp==1.26.0
+    # via vllm
+opentelemetry-exporter-otlp-proto-common==1.26.0
+    # via
+    #   opentelemetry-exporter-otlp-proto-grpc
+    #   opentelemetry-exporter-otlp-proto-http
+opentelemetry-exporter-otlp-proto-grpc==1.26.0
+    # via opentelemetry-exporter-otlp
+opentelemetry-exporter-otlp-proto-http==1.26.0
+    # via opentelemetry-exporter-otlp
+opentelemetry-proto==1.26.0
+    # via
+    #   opentelemetry-exporter-otlp-proto-common
+    #   opentelemetry-exporter-otlp-proto-grpc
+    #   opentelemetry-exporter-otlp-proto-http
+opentelemetry-sdk==1.26.0
+    # via
+    #   opentelemetry-exporter-otlp-proto-grpc
+    #   opentelemetry-exporter-otlp-proto-http
+    #   vllm
+opentelemetry-semantic-conventions==0.47b0
+    # via opentelemetry-sdk
+opentelemetry-semantic-conventions-ai==0.4.9
+    # via vllm
     # via opencensus
 opencv-python-headless==4.11.0.86
     # via
@@ -468,6 +552,7 @@ opentelemetry-semantic-conventions-ai==0.4.9
     # via vllm
 outlines==0.1.11
     # via vllm
+    # via vllm
 outlines-core==0.1.26
     # via outlines
 packaging==25.0
@@ -489,10 +574,12 @@ packaging==25.0
     #   transformers
 paginate==0.5.7
     # via mkdocs-material
+    # via mkdocs-material
 pandas==2.2.3
     # via datasets
 parameterized==0.9.0
 partial-json-parser==0.2.1.1.post5
+    # via vllm
     # via vllm
 pathspec==0.12.1
     # via
@@ -549,6 +636,9 @@ py-cpuinfo==9.0.0
     # via
     #   deepspeed
     #   vllm
+    # via
+    #   deepspeed
+    #   vllm
 py-spy==0.4.0
     # via ray
 pyarrow==20.0.0
@@ -557,11 +647,15 @@ pyasn1==0.6.1
     # via
     #   pyasn1-modules
     #   rsa
+    # via
+    #   pyasn1-modules
+    #   rsa
 pyasn1-modules==0.4.2
     # via google-auth
 pycodestyle==2.13.0
     # via flake8
 pycountry==24.6.1
+    # via outlines
     # via outlines
 pycparser==2.22 ; implementation_name == 'pypy'
     # via cffi
@@ -608,6 +702,7 @@ python-dotenv==1.1.0
     #   litellm
     #   uvicorn
 python-json-logger==3.3.0
+    # via vllm
     # via vllm
 python-multipart==0.0.20
     # via fastapi
@@ -713,6 +808,7 @@ setuptools==79.0.1
     #   wandb
 shellingham==1.5.4
     # via typer
+    # via typer
 six==1.17.0
     # via
     #   docker-pycreds
@@ -723,7 +819,9 @@ six==1.17.0
     #   vllm
 smart-open==7.1.0
     # via ray
+    # via ray
 smmap==5.0.2
+    # via gitdb
     # via gitdb
 sniffio==1.3.1
     # via
@@ -863,6 +961,7 @@ vllm==0.9.1
     # via open-instruct
 wandb==0.18.1
     # via open-instruct
+    # via open-instruct
 watchdog==6.0.0
     # via mkdocs
 watchfiles==1.0.5
@@ -873,7 +972,9 @@ websockets==15.0.1
     # via uvicorn
 werkzeug==3.1.3
     # via tensorboard
+    # via tensorboard
 windows-curses==2.4.1 ; sys_platform == 'win32'
+    # via nvitop
     # via nvitop
 wrapt==1.17.2
     # via
