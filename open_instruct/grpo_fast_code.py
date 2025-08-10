@@ -278,6 +278,12 @@ class Args:
     code_max_execution_time: float = 1.0
     """the max execution time to use for the code verifier"""
 
+    # -- manufactoria verifier
+    manufactoria_api_url: str = os.environ.get("MANUFACTORIA_API_URL", "http://localhost:1235") + "/test_solution"
+    """the api url to use for the manufactoria verifier"""
+    manufactoria_max_execution_time: float = 1.0
+    """the max execution time to use for the manufactoria verifier"""
+
     # -- non stop penalty
     non_stop_penalty: bool = False
     """whether to penalize responses which did not finish generation"""

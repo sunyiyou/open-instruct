@@ -82,6 +82,12 @@ class CodeVerifierConfig(VerifierConfig):
 
 
 @dataclass
+class ManufactoriaVerifierConfig(VerifierConfig):
+    manufactoria_api_url: str
+    manufactoria_max_execution_time: float
+
+
+@dataclass
 class VerificationResult:
     score: float
     cost: float = 0.0
@@ -773,6 +779,179 @@ class CodeVerifier(VerifierFunction):
             type: The VerifierConfig class or its subclass
         """
         return CodeVerifierConfig
+
+
+class ManufactoriaVerifier(VerifierFunction):
+    """
+    Verifier that executes Manufactoria DSL code against test cases using an external API.
+
+    The label should be a list of test cases with input/output pairs and acceptance criteria.
+    The API URL should be provided during initialization.
+    """
+
+    def __init__(self, verifier_config: ManufactoriaVerifierConfig) -> None:
+        super().__init__("manufactoria", verifier_config=verifier_config, weight=1.0)
+
+    def extract_manufactoria_code(self, model_output: str) -> str:
+        """Extract the last code block between ``` markers from the model output."""
+        # Find content between ``` markers
+        pattern = r"```(?:dsl|manufactoria)?(.*?)```"
+        matches = re.findall(pattern, model_output, re.DOTALL)
+
+        if not matches:
+            return model_output
+
+        # Return the last match, stripped of whitespace
+        return matches[-1].strip()
+
+    async def async_call(
+        self, tokenized_prediction: List[int], prediction: str, label: Any, query: Optional[str] = None
+    ) -> VerificationResult:
+        """
+        Asynchronously verify Manufactoria DSL execution against test cases.
+
+        Args:
+            tokenized_prediction: Unused tokenized representation
+            prediction: The model output containing Manufactoria DSL code
+            label: List of test cases with input/output/acceptance criteria
+            query: Unused original query
+
+        Returns:
+            VerificationResult with score as the pass rate of test cases
+        """
+        # Parse label to get test cases
+        if isinstance(label, str):
+            try:
+                test_cases = json.loads(label)
+            except json.JSONDecodeError:
+                error_msg = f"Failed to parse label as JSON: {label}"
+                logger.warning(error_msg)
+                return VerificationResult(score=0.0, reasoning=error_msg)
+        else:
+            test_cases = label
+
+        if not isinstance(test_cases, list):
+            error_msg = f"Label must be a list of test cases, got: {type(test_cases)}"
+            logger.warning(error_msg)
+            return VerificationResult(score=0.0, reasoning=error_msg)
+
+        if not test_cases:
+            error_msg = "No test cases provided"
+            logger.warning(error_msg)
+            return VerificationResult(score=0.0, reasoning=error_msg)
+
+        # Extract Manufactoria DSL code from the model output
+        dsl_code = self.extract_manufactoria_code(prediction)
+
+        # Test data
+        payload = {
+            "dsl": dsl_code,
+            "test_cases": test_cases,
+            "max_execution_time": self.verifier_config.manufactoria_max_execution_time,
+        }
+
+        try:
+            # Make the request in a thread pool to keep it async
+            def make_request():
+                response = requests.post(
+                    self.verifier_config.manufactoria_api_url, json=payload, headers={"Content-Type": "application/json"}
+                )
+                response.raise_for_status()
+                return response.json()
+
+            result = await asyncio.to_thread(make_request)
+            
+            # Collect reasoning information from the API response
+            reasoning_parts = []
+            pass_rate = 0.0
+            
+            # Check if the response has the expected structure
+            if "all_passed" in result:
+                # New API format returns all_passed boolean
+                pass_rate = 1.0 if result["all_passed"] else 0.0
+                reasoning_parts.append(f"All tests passed: {result['all_passed']}")
+                
+                # Add details about individual test results if available
+                if "results" in result and isinstance(result["results"], list):
+                    failed_tests = []
+                    for i, test_result in enumerate(result["results"]):
+                        if isinstance(test_result, dict) and not test_result.get("passed", True):
+                            reason = test_result.get("rejection_reason", "Unknown failure")
+                            input_tape = test_result.get("input", "")
+                            failed_tests.append(f"Test {i+1} (input: '{input_tape}'): {reason}")
+                    
+                    if failed_tests:
+                        reasoning_parts.append("Failed tests: " + "; ".join(failed_tests))
+                        
+            elif "results" in result:
+                # API format that returns individual test results
+                results = result["results"]
+                if isinstance(results, list) and len(results) > 0:
+                    # Count passed tests
+                    if isinstance(results[0], dict):
+                        passes = [r.get("passed", False) for r in results]
+                        failed_details = []
+                        for i, (r, passed) in enumerate(zip(results, passes)):
+                            if not passed:
+                                reason = r.get("rejection_reason", "Unknown failure")
+                                input_tape = r.get("input", "")
+                                failed_details.append(f"Test {i+1} (input: '{input_tape}'): {reason}")
+                        if failed_details:
+                            reasoning_parts.append("Failed tests: " + "; ".join(failed_details))
+                    else:
+                        passes = results
+                    pass_rate = sum(passes) / len(passes) if passes else 0.0
+                    reasoning_parts.append(f"Passed {sum(passes)}/{len(passes)} tests")
+                else:
+                    pass_rate = 0.0
+                    reasoning_parts.append("No test results returned")
+            else:
+                warning_msg = f"Unexpected API response format: {result}"
+                logger.warning(warning_msg)
+                reasoning_parts.append(warning_msg)
+                pass_rate = 0.0
+            
+            # Check for DSL validation errors
+            if "valid" in result and not result["valid"]:
+                if "message" in result:
+                    reasoning_parts.insert(0, f"DSL Error: {result['message']}")
+                else:
+                    reasoning_parts.insert(0, "DSL validation failed")
+                    
+            reasoning = "; ".join(reasoning_parts) if reasoning_parts else None
+            return VerificationResult(score=pass_rate, reasoning=reasoning)
+            
+        except Exception as e:
+            error_msg = f"Error verifying Manufactoria sample: {e}"
+            logger.warning(error_msg)
+            return VerificationResult(score=0.0, reasoning=error_msg)
+
+    def __call__(
+        self, tokenized_prediction: List[int], prediction: str, label: Any, query: Optional[str] = None
+    ) -> VerificationResult:
+        """
+        Synchronously verify Manufactoria DSL execution against test cases.
+        """
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                raise RuntimeError(
+                    "Cannot call synchronous __call__ method from within an async context. Use async_call instead."
+                )
+            else:
+                return asyncio.run(self.async_call(tokenized_prediction, prediction, label, query))
+        except RuntimeError:
+            return asyncio.run(self.async_call(tokenized_prediction, prediction, label, query))
+
+    @classmethod
+    def get_config_class(cls) -> type:
+        """
+        Return the configuration class for this verifier.
+
+        Returns:
+            type: The VerifierConfig class or its subclass
+        """
+        return ManufactoriaVerifierConfig
 
 
 def build_all_verifiers(args) -> Dict[str, VerifierFunction]:
