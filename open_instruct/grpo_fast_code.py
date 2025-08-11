@@ -152,6 +152,8 @@ class Args:
     """Whether to skip the cache."""
     shuffle_eval_dataset: bool = False
     """Whether to shuffle the evaluation dataset."""
+    use_last_n_eval_samples: bool = True
+    """Whether to use the last N samples from each evaluation dataset instead of the first N."""
     max_token_length: int = 512
     """The maximum token length to use for the dataset"""
     max_prompt_token_length: int = 256
@@ -211,6 +213,10 @@ class Args:
     stop_strings: Optional[List[str]] = None
     """List of strings that stop the generation when they are generated.
     The returned output will not contain the stop strings."""
+
+    # Model Configuration
+    attn_implementation: str = 'flash_attention_2'
+    """The attention implementation to use for the model. Options: 'eager', 'sdpa', 'flash_attention_2'"""
 
     # Algorithm
     async_mode: bool = True
@@ -322,6 +328,8 @@ class Args:
     """The wandb's project name"""
     wandb_entity: Optional[str] = None
     """The entity (team) of wandb's project"""
+    with_local_tracking: bool = False
+    """If toggled, evaluation results will be saved locally as CSV files"""
     push_to_hub: bool = True
     """Whether to upload the saved model to huggingface"""
     hf_entity: Optional[str] = None
@@ -538,7 +546,7 @@ class PolicyTrainerRayProcess(RayProcess):
             model_config.model_name_or_path,
             revision=model_config.model_revision,
             torch_dtype=torch.bfloat16,
-            attn_implementation="flash_attention_2",
+            attn_implementation=args.attn_implementation,
             use_cache=False,
         )
         disable_dropout_in_model(self.policy)
@@ -607,7 +615,7 @@ class PolicyTrainerRayProcess(RayProcess):
             model_config.model_name_or_path,
             revision=model_config.model_revision,
             torch_dtype=torch.bfloat16,
-            attn_implementation="flash_attention_2",
+            attn_implementation=args.attn_implementation,
             use_cache=False,
         )
         disable_dropout_in_model(self.ref_policy)
@@ -1183,9 +1191,18 @@ def data_preparation_thread(
             # In GRPO, if the std of grouped rewards is 0, then there is zero gradient for the batch
             # of args.num_samples_per_prompt_rollout responses, so we need to filter out those batches
             non_zero_std_mask = scores_per_prompt.std(axis=-1) != 0
-            real_batch_size_ratio = non_zero_std_mask.sum() * args.num_samples_per_prompt_rollout / len(scores)
-            expanded_mask = np.repeat(non_zero_std_mask, args.num_samples_per_prompt_rollout)
-            non_zero_gradient_index = np.where(expanded_mask)[0]
+            
+            # Check if all scores are zero or if non_zero_std_mask is all False
+            if np.all(scores == 0) or not np.any(non_zero_std_mask):
+                print("Warning: All scores are zero or all std values are zero. Keeping only a few random samples.")
+                # Just keep a few random samples instead of the whole batch
+                num_samples_to_keep = min(args.per_device_train_batch_size * 2, len(scores))
+                non_zero_gradient_index = np.random.choice(len(scores), size=num_samples_to_keep, replace=False)
+                real_batch_size_ratio = num_samples_to_keep / len(scores)
+            else:
+                real_batch_size_ratio = non_zero_std_mask.sum() * args.num_samples_per_prompt_rollout / len(scores)
+                expanded_mask = np.repeat(non_zero_std_mask, args.num_samples_per_prompt_rollout)
+                non_zero_gradient_index = np.where(expanded_mask)[0]
             advantages = advantages[non_zero_gradient_index]
             scores = scores[non_zero_gradient_index]
             responses = [responses[i] for i in non_zero_gradient_index]
@@ -1441,20 +1458,29 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
     train_dataset = train_dataset.shuffle(seed=args.seed)
     eval_dataset = None
     if len(args.dataset_mixer_eval_list) > 0:
+        # Create separate transform_fn_args for evaluation without length constraints
+        eval_transform_fn_args = [
+            {},
+            {
+                # No max_token_length or max_prompt_token_length to disable filtering
+                "need_contain_labels": True
+            },
+        ]
         eval_dataset = get_cached_dataset_tulu(
             args.dataset_mixer_eval_list,
             args.dataset_mixer_eval_list_splits,
             tc,
             args.dataset_transform_fn,
-            transform_fn_args,
+            eval_transform_fn_args,
             hf_entity=args.hf_entity,
             dataset_cache_mode=args.dataset_cache_mode,
             dataset_config_hash=args.dataset_config_eval_hash,
             dataset_local_cache_dir=args.dataset_local_cache_dir,
             dataset_skip_cache=args.dataset_skip_cache,
+            use_last_n=args.use_last_n_eval_samples,
         )
-        if args.shuffle_eval_dataset:
-            eval_dataset = eval_dataset.shuffle(seed=args.seed)
+        # if args.shuffle_eval_dataset:
+        #     eval_dataset = eval_dataset.shuffle(seed=args.seed)
     visualize_token(train_dataset[0][INPUT_IDS_PROMPT_KEY], tokenizer)
     if args.cache_dataset_only:
         return
@@ -1570,10 +1596,40 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
 
     eval_prompt_token_ids = None
     eval_ground_truths = None
+    eval_dataset_names = None
+    eval_original_sources = None
     if eval_dataset is not None:
-        eval_prompt_token_ids = eval_dataset[:num_eval_samples][INPUT_IDS_PROMPT_KEY]
-        eval_ground_truths = eval_dataset[:num_eval_samples][GROUND_TRUTHS_KEY]
-        eval_dataset_names = eval_dataset[:num_eval_samples][DATASET_SOURCE_KEY]
+        # Add a "__dataset_source__" column to track the original dataset for each sample
+        sources = []
+        start_idx = 0
+        # Loop through each dataset in the mixer and tag its samples
+        for i in range(0, len(args.dataset_mixer_eval_list), 2):
+            dataset_name = args.dataset_mixer_eval_list[i]
+            frac_or_num_samples = args.dataset_mixer_eval_list[i+1]
+            
+            # Convert to number of samples
+            if "." in frac_or_num_samples:
+                num_samples = int(float(frac_or_num_samples) * len(eval_dataset))
+            else:
+                num_samples = int(frac_or_num_samples)
+            
+            # Tag this range of samples with their source dataset
+            sources.extend([dataset_name] * num_samples)
+            start_idx += num_samples
+        
+        assert len(sources) == len(eval_dataset)
+        
+        # Add column to dataset - this preserves ordering even with shuffling
+        eval_dataset = eval_dataset.add_column("__dataset_source__", sources)
+        
+        # Now select samples for evaluation
+        eval_dataset_subset = eval_dataset[:num_eval_samples]
+        
+        # Extract data with original source information preserved
+        eval_prompt_token_ids = eval_dataset_subset[INPUT_IDS_PROMPT_KEY]
+        eval_ground_truths = eval_dataset_subset[GROUND_TRUTHS_KEY]
+        eval_dataset_names = eval_dataset_subset[DATASET_SOURCE_KEY]  # For verifier
+        eval_original_sources = eval_dataset_subset["__dataset_source__"]  # Original dataset names
     thread = threading.Thread(
         target=vllm_generate_thread,
         args=(
@@ -1767,6 +1823,32 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
                     )
                 )
                 eval_reward_metrics = {f"eval/{key}": val for key, val in eval_reward_metrics.items()}
+                
+                # Group evaluation results by dataset source
+                eval_dataset_metrics = defaultdict(list)
+                eval_dataset_indices = defaultdict(list)
+                
+                # Track which dataset each sample comes from using the original sources
+                if eval_original_sources is not None:
+                    for i, original_dataset in enumerate(eval_original_sources):
+                        eval_dataset_indices[original_dataset].append(i)
+                    
+                    # Calculate per-dataset metrics
+                    for dataset_name, indices in eval_dataset_indices.items():
+                        dataset_display_name = dataset_name.split('/')[-1]  # Just use last part of path for cleaner names
+                        dataset_scores = [eval_scores[i] for i in indices]
+                        dataset_seq_lengths = [eval_sequence_lengths[i] for i in indices]
+                        
+                        # Add dataset-specific metrics
+                        dataset_metrics = {
+                            f"eval/{dataset_display_name}/scores": np.mean(dataset_scores),
+                            f"eval/{dataset_display_name}/sequence_lengths": np.mean(dataset_seq_lengths),
+                            f"eval/{dataset_display_name}/sample_count": len(indices)
+                        }
+                        
+                        # Add dataset metrics to overall metrics
+                        eval_reward_metrics.update(dataset_metrics)
+                
                 eval_metrics = {
                     "eval/scores": np.array(eval_scores).mean(),
                     "eval/sequence_lengths": eval_sequence_lengths.mean(),
@@ -1784,9 +1866,34 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
                 table["response"] = [item.replace(tokenizer.pad_token, "") for item in table["response"]]
                 table["scores"] = eval_scores
                 table["ground_truth"] = eval_ground_truths
+                if eval_original_sources is not None:
+                    table["dataset"] = [s for s in eval_original_sources]  # Add dataset source to table
                 df = pd.DataFrame(table)
+                
+                # Save evaluation results locally
+                if args.with_local_tracking:
+                    os.makedirs(os.path.join(args.output_dir, "eval_results"), exist_ok=True)
+                    
+                    # Save per-dataset dataframes
+                    if eval_original_sources is not None:
+                        for dataset_name, indices in eval_dataset_indices.items():
+                            if indices:  # Skip empty datasets
+                                dataset_display_name = dataset_name.split('/')[-1]
+                                ds_df = df.iloc[indices]
+                                dataset_df_path = os.path.join(args.output_dir, "eval_results", f"eval_step_{training_step}_{dataset_display_name}.csv")
+                                ds_df.to_csv(dataset_df_path, index=False)
+                
                 if args.with_tracking:
+                    # Log the full table
                     wandb.log({"sample_completions": wandb.Table(dataframe=df)})
+                    
+                    # Create per-dataset tables
+                    if eval_original_sources is not None:
+                        for dataset_name, indices in eval_dataset_indices.items():
+                            if indices:  # Skip empty datasets
+                                dataset_display_name = dataset_name.split('/')[-1]
+                                ds_df = df.iloc[indices]
+                                wandb.log({f"sample_completions/{dataset_display_name}": wandb.Table(dataframe=ds_df)})
                 else:
                     print_rich_table(df.iloc[:1])
                 del table
@@ -1878,6 +1985,14 @@ if __name__ == "__main__":
         ]
         scores = [0] * len(decoded_responses)
         metrics = {}
+        
+        # Track per-dataset metrics
+        dataset_scores = defaultdict(list)
+        dataset_indices = defaultdict(list)
+        
+        # Map each response to its dataset source
+        for i, dataset_source in enumerate(datasets):
+            dataset_indices[dataset_source].append(i)
 
         if args.apply_r1_style_format_reward:
             with Timer("[Data Preparation Thread] Calculating rewards -- 🧮 Calculating format reward"):
@@ -1887,6 +2002,13 @@ if __name__ == "__main__":
                 for i in range(len(format_scores)):
                     scores[i] = format_scores[i] + scores[i]
                 metrics["val/format_scores"] = np.array(format_scores).mean()
+                
+                # Calculate per-dataset format scores
+                for ds, indices in dataset_indices.items():
+                    ds_format_scores = [format_scores[i] for i in indices]
+                    if ds_format_scores:
+                        display_name = ds.split('/')[-1]
+                        metrics[f"val/{display_name}/format_scores"] = np.array(ds_format_scores).mean()
 
         if args.apply_verifiable_reward:
             with Timer("[Data Preparation Thread] Calculating rewards -- 🏆 Applying verifiable reward"):
@@ -1913,6 +2035,16 @@ if __name__ == "__main__":
                 np_verifiable_rewards = np.array(verifiable_rewards)
                 metrics["objective/verifiable_reward"] = np_verifiable_rewards.mean()
                 metrics["objective/verifiable_correct_rate"] = (np_verifiable_rewards > 0.0).mean()
+                
+                # Per-dataset verifiable rewards
+                for ds, indices in dataset_indices.items():
+                    ds_verifiable_rewards = [verifiable_rewards[i] for i in indices]
+                    if ds_verifiable_rewards:
+                        display_name = ds.split('/')[-1]
+                        ds_np_rewards = np.array(ds_verifiable_rewards)
+                        metrics[f"objective/{display_name}/verifiable_reward"] = ds_np_rewards.mean()
+                        metrics[f"objective/{display_name}/verifiable_correct_rate"] = (ds_np_rewards > 0.0).mean()
+                
                 # reshuffle around per_func rewards
                 per_func_lists = defaultdict(list)
                 for reward_dict in per_func_rewards:
@@ -1931,6 +2063,13 @@ if __name__ == "__main__":
                 for i in range(len(finish_reasons)):
                     if finish_reasons[i] != "stop":
                         scores[i] = args.non_stop_penalty_value
+
+        # Add final per-dataset scores with clean dataset names
+        for ds, indices in dataset_indices.items():
+            display_name = ds.split('/')[-1]
+            ds_scores = [scores[i] for i in indices]
+            if ds_scores:
+                metrics[f"val/{display_name}/scores"] = np.array(ds_scores).mean()
 
         return scores, metrics
 
