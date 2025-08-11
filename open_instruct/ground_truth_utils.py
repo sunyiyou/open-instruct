@@ -795,7 +795,7 @@ class ManufactoriaVerifier(VerifierFunction):
     def extract_manufactoria_code(self, model_output: str) -> str:
         """Extract the last code block between ``` markers from the model output."""
         # Find content between ``` markers
-        pattern = r"```(?:dsl|manufactoria)?(.*?)```"
+        pattern = r"```(?:manufactoria)?(.*?)```"
         matches = re.findall(pattern, model_output, re.DOTALL)
 
         if not matches:

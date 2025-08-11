@@ -5,7 +5,7 @@ TOTAL_CPUS=$(nproc)
 MANUFACTORIA_SERVER_CPUS=40
 STARTING_CPU=0
 NGINX_PORT=8071
-API_BASE_PORT=1235
+API_BASE_PORT=2345
 
 # Get leader replica IP
 BEAKER_LEADER_REPLICA_IP=$(getent hosts ${BEAKER_LEADER_REPLICA_HOSTNAME} | awk '{print $1}')
@@ -19,7 +19,7 @@ sudo sed -i 's/worker_connections [0-9]*;/worker_connections 100000;/' /etc/ngin
 
 # Function to create the Nginx configuration file on head node
 setup_nginx_head() {
-    local config_file="/etc/nginx/conf.d/manufactoria_api_loadbalancer.conf"
+    local config_file="/etc/nginx/conf.d/manufactoria_loadbalancer.conf"
     
     # Create upstream entries for all nodes
     upstream_entries=""
@@ -31,8 +31,8 @@ setup_nginx_head() {
     done
     
     # Create a proper configuration file
-    cat > /tmp/manufactoria_api_loadbalancer.conf << EOF
-upstream manufactoria_api_servers {
+    cat > /tmp/manufactoria_loadbalancer.conf << EOF
+upstream manufactoria_servers {
     least_conn;
 $(echo -e "$upstream_entries")
 }
@@ -40,7 +40,7 @@ $(echo -e "$upstream_entries")
 server {
     listen $NGINX_PORT;
     location / {
-        proxy_pass http://manufactoria_api_servers;
+        proxy_pass http://manufactoria_servers;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_connect_timeout 5s;
@@ -51,7 +51,7 @@ server {
 EOF
 
     # Move the config file and restart Nginx
-    sudo mv /tmp/manufactoria_api_loadbalancer.conf $config_file
+    sudo mv /tmp/manufactoria_loadbalancer.conf $config_file
     if [ -f /run/nginx.pid ] && [ -s /run/nginx.pid ]; then
         # Nginx is running, reload configuration
         sudo nginx -t && sudo nginx -s reload
@@ -67,7 +67,7 @@ start_uvicorn_servers() {
     echo "Starting Manufactoria API servers on $(hostname)"
     
     # Create logs directory
-    mkdir -p manufactoria_api_logs
+    mkdir -p api_logs
     
     # Start multiple uvicorn instances on separate cores
     for ((i=0; i<MANUFACTORIA_SERVER_CPUS; i++)); do
@@ -80,7 +80,7 @@ start_uvicorn_servers() {
         cd "$REPO_PATH"
         
         # Start uvicorn with better error handling
-        taskset -c $CPU_ID nohup uvicorn open_instruct.code.manufactoria_api:app --host 0.0.0.0 --port $PORT > manufactoria_api_logs/manufactoria_api_server_$PORT.log 2>&1 &
+        taskset -c $CPU_ID nohup uvicorn open_instruct.code.manufactoria_api:app --host 0.0.0.0 --port $PORT > api_logs/manufactoria_server_$PORT.log 2>&1 &
         SERVER_PID=$!
         echo "Manufactoria API server started on port $PORT with PID $SERVER_PID"
         
@@ -93,7 +93,7 @@ start_uvicorn_servers() {
                 echo "✓ First Manufactoria API server is responding on port $PORT"
             else
                 echo "⚠ First Manufactoria API server not responding on port $PORT, checking logs..."
-                tail -5 manufactoria_api_logs/manufactoria_api_server_$PORT.log
+                tail -5 api_logs/manufactoria_server_$PORT.log
             fi
         fi
     done
@@ -134,30 +134,8 @@ else
     echo "Nginx processes:"
     ps aux | grep nginx
     echo "Sample Manufactoria API server logs:"
-    ls manufactoria_api_logs/ | head -3 | xargs -I {} tail -3 manufactoria_api_logs/{}
+    ls api_logs/ | head -3 | xargs -I {} tail -3 api_logs/{}
 fi
 
 echo "Manufactoria API setup complete!"
 echo "API URL: $MANUFACTORIA_API_URL"
-
-# Test the Manufactoria API with a simple test case
-echo "Testing Manufactoria API with a simple test case..."
-test_payload='{
-    "dsl": "START start:\n    NEXT end\n\nEND end",
-    "test_cases": [
-        {
-            "input": "",
-            "expected_output": "",
-            "expected_accepted": true,
-            "check_output": false,
-            "description": "Empty input should be accepted"
-        }
-    ],
-    "max_execution_time": 1.0
-}'
-
-if curl -s -X POST "$MANUFACTORIA_API_URL/test_solution" -H "Content-Type: application/json" -d "$test_payload" > /dev/null; then
-    echo "✓ Manufactoria API test_solution endpoint is working"
-else
-    echo "⚠ Manufactoria API test_solution endpoint failed"
-fi

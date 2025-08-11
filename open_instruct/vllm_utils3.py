@@ -239,13 +239,30 @@ def create_vllm_engines(
             additional_kwargs["tools"] = tools
             additional_kwargs["max_tool_calls"] = max_tool_calls_dict
 
+        # Prepare environment variables for Ray actors
+        ray_env_vars = {"VLLM_ENABLE_V1_MULTIPROCESSING": "0"}
+        
+        # Pass through important vLLM environment variables if set
+        vllm_env_vars_to_pass = [
+            "VLLM_DISABLE_COMPILE_CACHE",
+            "VLLM_TORCH_COMPILE_LEVEL", 
+            "VLLM_USE_TRITON_FLASH_ATTN",
+            "VLLM_ATTENTION_BACKEND",
+            "VLLM_CPU_KVCACHE_SPACE",
+            "VLLM_CPU_OMP_THREADS_BIND",
+        ]
+        
+        for env_var in vllm_env_vars_to_pass:
+            if env_var in os.environ:
+                ray_env_vars[env_var] = os.environ[env_var]
+        
         vllm_engines.append(
             LLMRayActor.options(
                 num_cpus=num_gpus,
                 num_gpus=num_gpus,
                 scheduling_strategy=scheduling_strategy,
                 # VLLM v1 multiprocessing is required due to https://github.com/vllm-project/vllm/issues/15349
-                runtime_env=ray.runtime_env.RuntimeEnv(env_vars={"VLLM_ENABLE_V1_MULTIPROCESSING": "0"}),
+                runtime_env=ray.runtime_env.RuntimeEnv(env_vars=ray_env_vars),
             ).remote(
                 model=pretrain,
                 revision=revision,

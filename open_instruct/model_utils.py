@@ -232,7 +232,7 @@ async def apply_verifiable_reward(
         # allow multiple ground truths and datasets for a single response
 
         # TODO: both code and lm_judge might have list of ground_truth *per instance*
-        if isinstance(ground_truth, str):
+        if isinstance(ground_truth, str) or dataset == "manufactoria":
             ground_truth_list = [ground_truth]
         else:
             ground_truth_list = ground_truth
