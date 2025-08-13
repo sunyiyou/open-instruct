@@ -283,6 +283,8 @@ class Args:
     """the api url to use for the manufactoria verifier"""
     manufactoria_max_execution_time: float = 1.0
     """the max execution time to use for the manufactoria verifier"""
+    manufactoria_scoring_mode: str = "all_pass"
+    """the scoring mode for manufactoria verifier: 'all_pass' (binary) or 'pass_rate' (gradual)"""
 
     # -- non stop penalty
     non_stop_penalty: bool = False
@@ -1889,7 +1891,7 @@ if __name__ == "__main__":
 
         if args.apply_verifiable_reward:
             with Timer("[Data Preparation Thread] Calculating rewards -- 🏆 Applying verifiable reward"):
-                verifiable_rewards, per_func_rewards = await apply_verifiable_reward(
+                verifiable_rewards, per_func_rewards, additional_metrics = await apply_verifiable_reward(
                     reward_fn_mapping,
                     responses,
                     decoded_responses,
@@ -1922,6 +1924,28 @@ if __name__ == "__main__":
                     np_value = np.array(value)
                     metrics[f"objective/{key}_reward"] = np_value.mean()
                     metrics[f"objective/{key}_correct_rate"] = (np_value > 0.0).mean()
+                
+                # log additional metrics per dataset (e.g., manufactoria all_pass vs pass_rate)
+                # First, we need to build dataset_indices for this context
+                dataset_indices = defaultdict(list)
+                for i, dataset_source in enumerate(datasets):
+                    dataset_indices[dataset_source].append(i)
+                
+                for ds, indices in dataset_indices.items():
+                    display_name = ds.split('/')[-1]
+                    ds_additional_metrics = defaultdict(list)
+                    
+                    # Collect additional metrics for this dataset
+                    for i in indices:
+                        if i < len(additional_metrics):
+                            for key, value in additional_metrics[i].items():
+                                ds_additional_metrics[key].append(value)
+                    
+                    # Log per-dataset additional metrics
+                    for key, values in ds_additional_metrics.items():
+                        if values:  # Only log if we have values
+                            np_value = np.array(values)
+                            metrics[f"val/{display_name}/{key}"] = np_value.mean()
 
         # this gets applied at the very end since it replaces (rather than adds to) the existing reward.
         if args.non_stop_penalty:

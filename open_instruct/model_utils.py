@@ -271,6 +271,7 @@ async def apply_verifiable_reward(
     # Initialize results for each response
     response_rewards = [0] * len(responses)
     response_per_func_rewards = [{} for _ in range(len(responses))]
+    response_additional_metrics = [{} for _ in range(len(responses))]
 
     # Process results
     for result, metadata in zip(reward_results, task_metadata):
@@ -288,7 +289,12 @@ async def apply_verifiable_reward(
             response_per_func_rewards[response_idx].get(dataset, 0) + weighted_reward
         )
 
-    return response_rewards, response_per_func_rewards
+        # Store additional metrics if available
+        if hasattr(result, "additional_metrics") and result.additional_metrics:
+            for metric_name, metric_value in result.additional_metrics.items():
+                response_additional_metrics[response_idx][f"{dataset}_{metric_name}"] = metric_value
+
+    return response_rewards, response_per_func_rewards, response_additional_metrics
 
 
 def forward(

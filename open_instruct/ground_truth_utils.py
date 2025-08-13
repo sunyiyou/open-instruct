@@ -85,6 +85,7 @@ class CodeVerifierConfig(VerifierConfig):
 class ManufactoriaVerifierConfig(VerifierConfig):
     manufactoria_api_url: str
     manufactoria_max_execution_time: float
+    manufactoria_scoring_mode: str = "all_pass"  # "all_pass" or "pass_rate"
 
 
 @dataclass
@@ -92,6 +93,7 @@ class VerificationResult:
     score: float
     cost: float = 0.0
     reasoning: Optional[str] = None
+    additional_metrics: Optional[Dict[str, float]] = None
 
 
 class VerifierFunction(ABC):
@@ -865,14 +867,26 @@ class ManufactoriaVerifier(VerifierFunction):
             reasoning_parts = []
             pass_rate = 0.0
             
+            # Calculate both scoring modes
+            all_pass_score = 0.0
+            pass_rate_score = 0.0
+            
             # Check if the response has the expected structure
             if "all_passed" in result:
                 # New API format returns all_passed boolean
-                pass_rate = 1.0 if result["all_passed"] else 0.0
-                reasoning_parts.append(f"All tests passed: {result['all_passed']}")
+                all_pass_score = 1.0 if result["all_passed"] else 0.0
                 
-                # Add details about individual test results if available
+                # Calculate pass rate from individual results if available
                 if "results" in result and isinstance(result["results"], list):
+                    results = result["results"]
+                    passes = [r.get("passed", False) for r in results if isinstance(r, dict)]
+                    pass_rate_score = sum(passes) / len(passes) if passes else 0.0
+                    
+                    # Add detailed reasoning
+                    reasoning_parts.append(f"All tests passed: {result['all_passed']}")
+                    reasoning_parts.append(f"Pass rate: {sum(passes)}/{len(passes)} ({pass_rate_score:.3f})")
+                    
+                    # Add details about failed tests
                     failed_tests = []
                     for i, test_result in enumerate(result["results"]):
                         if isinstance(test_result, dict) and not test_result.get("passed", True):
@@ -882,6 +896,9 @@ class ManufactoriaVerifier(VerifierFunction):
                     
                     if failed_tests:
                         reasoning_parts.append("Failed tests: " + "; ".join(failed_tests))
+                else:
+                    pass_rate_score = all_pass_score  # fallback
+                    reasoning_parts.append(f"All tests passed: {result['all_passed']}")
                         
             elif "results" in result:
                 # API format that returns individual test results
@@ -900,16 +917,33 @@ class ManufactoriaVerifier(VerifierFunction):
                             reasoning_parts.append("Failed tests: " + "; ".join(failed_details))
                     else:
                         passes = results
-                    pass_rate = sum(passes) / len(passes) if passes else 0.0
-                    reasoning_parts.append(f"Passed {sum(passes)}/{len(passes)} tests")
+                    
+                    pass_rate_score = sum(passes) / len(passes) if passes else 0.0
+                    all_pass_score = 1.0 if pass_rate_score == 1.0 else 0.0
+                    
+                    reasoning_parts.append(f"Pass rate: {sum(passes)}/{len(passes)} ({pass_rate_score:.3f})")
+                    reasoning_parts.append(f"All passed: {all_pass_score == 1.0}")
                 else:
-                    pass_rate = 0.0
+                    pass_rate_score = 0.0
+                    all_pass_score = 0.0
                     reasoning_parts.append("No test results returned")
             else:
                 warning_msg = f"Unexpected API response format: {result}"
                 logger.warning(warning_msg)
                 reasoning_parts.append(warning_msg)
-                pass_rate = 0.0
+                pass_rate_score = 0.0
+                all_pass_score = 0.0
+            
+            # Choose the score based on the configured mode
+            scoring_mode = getattr(self.verifier_config, 'manufactoria_scoring_mode', 'all_pass')
+            if scoring_mode == "pass_rate":
+                final_score = pass_rate_score
+            else:  # default to "all_pass"
+                final_score = all_pass_score
+            
+            # Add scoring mode info to reasoning
+            reasoning_parts.insert(0, f"Scoring mode: {scoring_mode}")
+            reasoning_parts.append(f"Final score ({scoring_mode}): {final_score:.3f}")
             
             # Check for DSL validation errors
             if "valid" in result and not result["valid"]:
@@ -919,7 +953,11 @@ class ManufactoriaVerifier(VerifierFunction):
                     reasoning_parts.insert(0, "DSL validation failed")
                     
             reasoning = "; ".join(reasoning_parts) if reasoning_parts else None
-            return VerificationResult(score=pass_rate, reasoning=reasoning)
+            additional_metrics = {
+                "manufactoria_all_pass": all_pass_score,
+                "manufactoria_pass_rate": pass_rate_score
+            }
+            return VerificationResult(score=final_score, reasoning=reasoning, additional_metrics=additional_metrics)
             
         except Exception as e:
             error_msg = f"Error verifying Manufactoria sample: {e}"
