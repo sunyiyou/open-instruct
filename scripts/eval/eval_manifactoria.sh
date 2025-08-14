@@ -22,6 +22,8 @@ export MANUFACTORIA_API_URL=http://localhost:8071
 model_name_or_path=Qwen/Qwen3-4B-Thinking-2507
 exp_name=Qwen3-4B-Thinking-2507-manufactoria-all
 
+
+
 python open_instruct/eval_code_api.py \
     --model_name_or_path $model_name_or_path \
     --api_config.model_type huggingface \
