@@ -553,12 +553,96 @@ class CodeEvaluator:
             
         return results
     
+    def check_existing_runs(self) -> int:
+        """Check how many evaluation runs already exist in the output directory"""
+        if not os.path.exists(self.args.output_dir):
+            return 0
+        
+        existing_runs = 0
+        # Check for existing detailed CSV files (run_N_detailed.csv pattern)
+        for filename in os.listdir(self.args.output_dir):
+            if filename.startswith("run_") and filename.endswith("_detailed.csv"):
+                try:
+                    # Extract run ID from filename
+                    run_id = int(filename.split("_")[1])
+                    existing_runs = max(existing_runs, run_id + 1)
+                except (ValueError, IndexError):
+                    continue
+        
+        return existing_runs
+
+    def load_existing_results(self, num_existing_runs: int) -> List[Dict]:
+        """Load existing evaluation results from CSV files"""
+        existing_results = []
+        
+        for run_id in range(num_existing_runs):
+            # Load metrics from summary CSV if available
+            summary_csv_path = os.path.join(self.args.output_dir, f"run_{run_id}_summary.csv")
+            if os.path.exists(summary_csv_path):
+                summary_df = pd.read_csv(summary_csv_path)
+                overall_row = summary_df[summary_df["dataset"] == "OVERALL"].iloc[0]
+                
+                # Create a basic result structure with key metrics
+                result = {
+                    "run_id": run_id,
+                    "metrics": {
+                        "verifiable_correct_rate": overall_row["pass_rate"],
+                        "verifiable_reward": overall_row["avg_score"],
+                    },
+                    "stop_rate": 1.0 - overall_row["tool_timeout_rate"] - overall_row["tool_error_rate"],  # Approximation
+                    "avg_sequence_length": 0.0,  # Not available in summary
+                    "total_samples": int(overall_row["total_samples"]),
+                }
+                
+                # Add per-dataset metrics if available
+                for _, row in summary_df.iterrows():
+                    if row["dataset"] != "OVERALL":
+                        dataset_name = row["dataset"].split('/')[-1]
+                        result["metrics"][f"{dataset_name}/verifiable_reward"] = row["avg_score"]
+                        result["metrics"][f"{dataset_name}/verifiable_correct_rate"] = row["pass_rate"]
+                
+                existing_results.append(result)
+            else:
+                print(f"⚠️  Warning: Could not find summary file for run {run_id}")
+        
+        return existing_results
+
+    def load_and_aggregate_existing_results(self) -> Dict:
+        """Load all existing results and return aggregated results"""
+        existing_runs = self.check_existing_runs()
+        existing_results = self.load_existing_results(existing_runs)
+        return self.aggregate_results(existing_results)
+
     async def run_evaluation(self) -> Dict:
         """Run multiple evaluation runs and aggregate results"""
-        print(f"🎯 Starting evaluation with {self.args.num_runs} runs")
+        # Check for existing runs
+        existing_runs = self.check_existing_runs()
+        if existing_runs > 0:
+            print(f"📁 Found {existing_runs} existing runs in {self.args.output_dir}")
+            
+            if existing_runs >= self.args.num_runs:
+                print(f"✅ Already have {existing_runs} runs (requested {self.args.num_runs}). No additional runs needed.")
+                # Load existing results and return aggregated
+                return self.load_and_aggregate_existing_results()
+            else:
+                remaining_runs = self.args.num_runs - existing_runs
+                print(f"🔄 Need {remaining_runs} more runs to reach {self.args.num_runs} total")
+                start_run_id = existing_runs
+        else:
+            print(f"🎯 Starting evaluation with {self.args.num_runs} runs")
+            start_run_id = 0
+            remaining_runs = self.args.num_runs
         
         all_results = []
-        for run_id in range(self.args.num_runs):
+        
+        # Load existing results if any
+        if existing_runs > 0:
+            existing_results = self.load_existing_results(existing_runs)
+            all_results.extend(existing_results)
+        
+        # Run additional evaluations
+        for i in range(remaining_runs):
+            run_id = start_run_id + i
             result = await self.run_single_evaluation(run_id)
             all_results.append(result)
             
@@ -621,23 +705,63 @@ class CodeEvaluator:
             
         os.makedirs(self.args.output_dir, exist_ok=True)
         
-        # Save aggregated results
-        with open(os.path.join(self.args.output_dir, "aggregated_results.json"), "w") as f:
-            # Convert numpy types to Python types for JSON serialization
-            def convert_numpy(obj):
-                if isinstance(obj, np.ndarray):
-                    return obj.tolist()
-                elif isinstance(obj, (np.int64, np.int32)):
-                    return int(obj)
-                elif isinstance(obj, (np.float64, np.float32)):
-                    return float(obj)
-                elif isinstance(obj, dict):
-                    return {k: convert_numpy(v) for k, v in obj.items()}
-                elif isinstance(obj, list):
-                    return [convert_numpy(item) for item in obj]
-                return obj
-            
-            json.dump(convert_numpy(results), f, indent=2)
+        # Convert numpy types to Python types for JSON serialization
+        def convert_numpy(obj):
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, (np.int64, np.int32)):
+                return int(obj)
+            elif isinstance(obj, (np.float64, np.float32)):
+                return float(obj)
+            elif isinstance(obj, dict):
+                return {k: convert_numpy(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_numpy(item) for item in obj]
+            return obj
+        
+        # Create separate results for metrics and samples
+        metrics_results = {
+            "num_runs": results["num_runs"],
+            "metrics": results["metrics"],
+            "stop_rate": results["stop_rate"],
+            "avg_sequence_length": results["avg_sequence_length"],
+        }
+        
+        # Add individual run metrics (without detailed samples)
+        metrics_results["individual_runs"] = []
+        for run_result in results["individual_runs"]:
+            run_metrics = {
+                "run_id": run_result["run_id"],
+                "metrics": run_result["metrics"],
+                "stop_rate": run_result["stop_rate"],
+                "avg_sequence_length": run_result["avg_sequence_length"],
+                "total_samples": run_result["total_samples"],
+            }
+            metrics_results["individual_runs"].append(run_metrics)
+        
+        # Save aggregated metrics (without samples)
+        with open(os.path.join(self.args.output_dir, "aggregated_metrics.json"), "w") as f:
+            json.dump(convert_numpy(metrics_results), f, indent=2)
+        
+        # Save detailed samples separately for each run
+        samples_results = {
+            "num_runs": results["num_runs"],
+            "individual_runs": []
+        }
+        
+        for run_result in results["individual_runs"]:
+            if "detailed" in run_result:
+                run_samples = {
+                    "run_id": run_result["run_id"],
+                    "total_samples": run_result["total_samples"],
+                    "detailed": run_result["detailed"]
+                }
+                samples_results["individual_runs"].append(run_samples)
+        
+        # Save sample outputs (only if there are detailed results)
+        if samples_results["individual_runs"]:
+            with open(os.path.join(self.args.output_dir, "aggregated_samples.json"), "w") as f:
+                json.dump(convert_numpy(samples_results), f, indent=2)
         
         # Save detailed results for each run
         for run_result in results["individual_runs"]:
@@ -736,6 +860,9 @@ class CodeEvaluator:
                 summary_df.to_csv(summary_csv_path, index=False)
         
         print(f"💾 Results saved to {self.args.output_dir}")
+        print(f"  📊 Metrics: aggregated_metrics.json")
+        print(f"  📝 Samples: aggregated_samples.json")
+        print(f"  📈 Per-run CSVs: run_N_detailed.csv, run_N_summary.csv")
 
 
 def print_results_summary(results: Dict):
