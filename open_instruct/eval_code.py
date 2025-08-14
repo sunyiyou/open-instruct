@@ -706,7 +706,7 @@ class CodeEvaluator:
     
     async def run_single_evaluation_for_dataset(self, run_id: int, eval_dataset, dataset_name: str, output_dir: str = None) -> Dict:
         """Run a single evaluation for a specific dataset"""
-        print(f"  🧪 Running evaluation {run_id + 1}/{self.args.num_runs} for {dataset_name}")
+        print(f"🧪 Running evaluation {run_id + 1}/{self.args.num_runs} for {dataset_name}")
         
         # Use all samples from the dataset (already sized according to dataset_mixer_eval_list)
         eval_dataset_subset = eval_dataset
