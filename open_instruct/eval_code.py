@@ -170,6 +170,39 @@ class CodeEvaluator:
         self.reward_fn_mapping = None
         self.eval_dataset = None
         
+        # Generate dataset folder name for organizing results
+        self.dataset_folder_name = self.generate_dataset_folder_name()
+        self.dataset_output_dir = os.path.join(self.args.output_dir, self.dataset_folder_name)
+    
+    def generate_dataset_folder_name(self) -> str:
+        """Generate a folder name based on the dataset mixer configuration"""
+        dataset_names = []
+        
+        # Extract dataset names from dataset_mixer_eval_list
+        for i in range(0, len(self.args.dataset_mixer_eval_list), 2):
+            dataset_name = self.args.dataset_mixer_eval_list[i]
+            # Clean up dataset name for folder usage
+            clean_name = dataset_name.replace("/", "_").replace("-", "_")
+            # Take just the last part if it's a long path
+            if "_" in clean_name:
+                clean_name = clean_name.split("_")[-1]
+            dataset_names.append(clean_name)
+        
+        # Combine dataset names, but keep it reasonable length
+        if len(dataset_names) == 1:
+            folder_name = dataset_names[0]
+        elif len(dataset_names) <= 3:
+            folder_name = "_".join(dataset_names)
+        else:
+            # If too many datasets, use first 2 and add "plus_N_more"
+            folder_name = "_".join(dataset_names[:2]) + f"_plus_{len(dataset_names)-2}_more"
+        
+        # Add number of eval samples if specified
+        if self.args.num_eval_samples is not None:
+            folder_name += f"_n{self.args.num_eval_samples}"
+        
+        return folder_name
+        
     def setup(self):
         """Initialize all components needed for evaluation"""
         print("🔧 Setting up evaluator...")
@@ -554,13 +587,13 @@ class CodeEvaluator:
         return results
     
     def check_existing_runs(self) -> int:
-        """Check how many evaluation runs already exist in the output directory"""
-        if not os.path.exists(self.args.output_dir):
+        """Check how many evaluation runs already exist in the dataset-specific output directory"""
+        if not os.path.exists(self.dataset_output_dir):
             return 0
         
         existing_runs = 0
         # Check for existing detailed CSV files (run_N_detailed.csv pattern)
-        for filename in os.listdir(self.args.output_dir):
+        for filename in os.listdir(self.dataset_output_dir):
             if filename.startswith("run_") and filename.endswith("_detailed.csv"):
                 try:
                     # Extract run ID from filename
@@ -577,7 +610,7 @@ class CodeEvaluator:
         
         for run_id in range(num_existing_runs):
             # Load metrics from summary CSV if available
-            summary_csv_path = os.path.join(self.args.output_dir, f"run_{run_id}_summary.csv")
+            summary_csv_path = os.path.join(self.dataset_output_dir, f"run_{run_id}_summary.csv")
             if os.path.exists(summary_csv_path):
                 summary_df = pd.read_csv(summary_csv_path)
                 overall_row = summary_df[summary_df["dataset"] == "OVERALL"].iloc[0]
@@ -615,10 +648,14 @@ class CodeEvaluator:
 
     async def run_evaluation(self) -> Dict:
         """Run multiple evaluation runs and aggregate results"""
+        # Display dataset folder information
+        print(f"📂 Dataset folder: {self.dataset_folder_name}")
+        print(f"📍 Results will be saved to: {self.dataset_output_dir}")
+        
         # Check for existing runs
         existing_runs = self.check_existing_runs()
         if existing_runs > 0:
-            print(f"📁 Found {existing_runs} existing runs in {self.args.output_dir}")
+            print(f"📁 Found {existing_runs} existing runs for this dataset configuration")
             
             if existing_runs >= self.args.num_runs:
                 print(f"✅ Already have {existing_runs} runs (requested {self.args.num_runs}). No additional runs needed.")
@@ -629,7 +666,7 @@ class CodeEvaluator:
                 print(f"🔄 Need {remaining_runs} more runs to reach {self.args.num_runs} total")
                 start_run_id = existing_runs
         else:
-            print(f"🎯 Starting evaluation with {self.args.num_runs} runs")
+            print(f"🎯 Starting evaluation with {self.args.num_runs} runs for this dataset")
             start_run_id = 0
             remaining_runs = self.args.num_runs
         
@@ -703,7 +740,7 @@ class CodeEvaluator:
         if not self.args.save_results:
             return
             
-        os.makedirs(self.args.output_dir, exist_ok=True)
+        os.makedirs(self.dataset_output_dir, exist_ok=True)
         
         # Convert numpy types to Python types for JSON serialization
         def convert_numpy(obj):
@@ -740,7 +777,7 @@ class CodeEvaluator:
             metrics_results["individual_runs"].append(run_metrics)
         
         # Save aggregated metrics (without samples)
-        with open(os.path.join(self.args.output_dir, "aggregated_metrics.json"), "w") as f:
+        with open(os.path.join(self.dataset_output_dir, "aggregated_metrics.json"), "w") as f:
             json.dump(convert_numpy(metrics_results), f, indent=2)
         
         # Save detailed samples separately for each run
@@ -760,7 +797,7 @@ class CodeEvaluator:
         
         # Save sample outputs (only if there are detailed results)
         if samples_results["individual_runs"]:
-            with open(os.path.join(self.args.output_dir, "aggregated_samples.json"), "w") as f:
+            with open(os.path.join(self.dataset_output_dir, "aggregated_samples.json"), "w") as f:
                 json.dump(convert_numpy(samples_results), f, indent=2)
         
         # Save detailed results for each run
@@ -821,7 +858,7 @@ class CodeEvaluator:
                 }
                 
                 df = pd.DataFrame(df_data)
-                csv_path = os.path.join(self.args.output_dir, f"run_{run_id}_detailed.csv")
+                csv_path = os.path.join(self.dataset_output_dir, f"run_{run_id}_detailed.csv")
                 df.to_csv(csv_path, index=False)
                 
                 # Save a summary CSV with pass rates by dataset
@@ -856,10 +893,11 @@ class CodeEvaluator:
                 }
                 summary_df = pd.concat([summary_df, pd.DataFrame([overall_summary])], ignore_index=True)
                 
-                summary_csv_path = os.path.join(self.args.output_dir, f"run_{run_id}_summary.csv")
+                summary_csv_path = os.path.join(self.dataset_output_dir, f"run_{run_id}_summary.csv")
                 summary_df.to_csv(summary_csv_path, index=False)
         
-        print(f"💾 Results saved to {self.args.output_dir}")
+        print(f"💾 Results saved to {self.dataset_output_dir}")
+        print(f"  📂 Dataset folder: {self.dataset_folder_name}")
         print(f"  📊 Metrics: aggregated_metrics.json")
         print(f"  📝 Samples: aggregated_samples.json")
         print(f"  📈 Per-run CSVs: run_N_detailed.csv, run_N_summary.csv")
@@ -946,6 +984,7 @@ async def main():
     
     # Initialize evaluator
     evaluator = CodeEvaluator(args, tokenizer_config, model_config)
+    print(f"📂 Dataset configuration: {evaluator.dataset_folder_name}")
     evaluator.setup()
     
     # Print actual number of samples after setup
