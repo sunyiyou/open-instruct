@@ -439,18 +439,16 @@ class CodeEvaluator:
                             scores[i] = verifiable_rewards[i]
                             
                 np_verifiable_rewards = np.array(verifiable_rewards)
-                metrics["verifiable_reward"] = np_verifiable_rewards.mean()
-                metrics["verifiable_correct_rate"] = (np_verifiable_rewards > 0.0).mean()
-                
+                metrics["avg_score"] = np_verifiable_rewards.mean()
+
                 # Per-dataset verifiable rewards
                 for ds, indices in dataset_indices.items():
                     ds_verifiable_rewards = [verifiable_rewards[i] for i in indices]
                     if ds_verifiable_rewards:
                         display_name = ds.split('/')[-1]
                         ds_np_rewards = np.array(ds_verifiable_rewards)
-                        metrics[f"{display_name}/verifiable_reward"] = ds_np_rewards.mean()
-                        metrics[f"{display_name}/verifiable_correct_rate"] = (ds_np_rewards > 0.0).mean()
-                
+                        metrics[f"{display_name}/avg_score"] = ds_np_rewards.mean()
+
                 # Per-function rewards
                 per_func_lists = defaultdict(list)
                 for reward_dict in per_func_rewards:
@@ -460,7 +458,6 @@ class CodeEvaluator:
                 for key, value in per_func_lists.items():
                     np_value = np.array(value)
                     metrics[f"{key}_reward"] = np_value.mean()
-                    metrics[f"{key}_correct_rate"] = (np_value > 0.0).mean()
                 
                 # Log global additional metrics (e.g., manufactoria all_pass vs pass_rate)
                 additional_metrics_lists = defaultdict(list)
@@ -537,24 +534,43 @@ class CodeEvaluator:
                 summary_df = pd.read_csv(summary_csv_path)
                 overall_row = summary_df[summary_df["dataset"] == "OVERALL"].iloc[0]
                 
-                # Create a basic result structure with key metrics
+                # Start with basic result structure
                 result = {
                     "run_id": run_id,
-                    "metrics": {
-                        "verifiable_correct_rate": overall_row["pass_rate"],
-                        "verifiable_reward": overall_row["avg_score"],
-                    },
+                    "metrics": {},
                     "stop_rate": 1.0 - overall_row["tool_timeout_rate"] - overall_row["tool_error_rate"],  # Approximation
-                    "avg_sequence_length": 0.0,  # Not available in summary
+                    "avg_sequence_length": float(overall_row.get("avg_sequence_length", 0.0)),  # Load from summary CSV
                     "total_samples": int(overall_row["total_samples"]),
                 }
                 
-                # Add per-dataset metrics if available
+                # Load ALL available metrics from the overall row
+                # List of known CSV columns to load as metrics (excluding avg_sequence_length since it's already handled above)
+                metrics_columns = [
+                    "avg_score",
+                    "manufactoria_all_pass", 
+                    "manufactoria_pass_rate",
+                    "avg_tool_calls",
+                    "tool_timeout_rate",
+                    "tool_error_rate",
+                ]
+                
+                # Load overall metrics
+                for column in metrics_columns:
+                    if column in overall_row:
+                        result["metrics"][column] = overall_row[column]
+                
+                # Load per-dataset metrics
                 for _, row in summary_df.iterrows():
                     if row["dataset"] != "OVERALL":
                         dataset_name = row["dataset"].split('/')[-1]
-                        result["metrics"][f"{dataset_name}/verifiable_reward"] = row["avg_score"]
-                        result["metrics"][f"{dataset_name}/verifiable_correct_rate"] = row["pass_rate"]
+                        
+                        # Load all available per-dataset metrics
+                        for column in metrics_columns:
+                            if column in row:
+                                result["metrics"][f"{dataset_name}/{column}"] = row[column]
+                                # Also map avg_score to scores for consistency with existing code
+                                if column == "avg_score":
+                                    result["metrics"][f"{dataset_name}/scores"] = row[column]
                 
                 existing_results.append(result)
             else:
@@ -631,15 +647,14 @@ class CodeEvaluator:
         # Run additional evaluations
         for i in range(remaining_runs):
             run_id = start_run_id + i
-            result = await self.run_single_evaluation_for_dataset(run_id, single_dataset_eval, dataset_name)
+            result = await self.run_single_evaluation_for_dataset(run_id, single_dataset_eval, dataset_name, output_dir)
             all_results.append(result)
             
             # Print summary for this run
             metrics = result["metrics"]
             print(f"  Run {run_id + 1} Summary:")
-            print(f"    Verifiable Reward: {metrics.get('verifiable_reward', 0.0):.3f}")
-            # print(f"    Correct Rate: {metrics.get('verifiable_correct_rate', 0.0):.3f}")
-            
+            print(f"    Average Score: {metrics.get('avg_score', 0.0):.3f}")
+
             # Show both Manufactoria metrics if available
             if 'manufactoria_all_pass' in metrics:
                 print(f"    Manufactoria All Pass: {metrics['manufactoria_all_pass']:.3f}")
@@ -689,7 +704,7 @@ class CodeEvaluator:
         
         return single_eval_dataset
     
-    async def run_single_evaluation_for_dataset(self, run_id: int, eval_dataset, dataset_name: str) -> Dict:
+    async def run_single_evaluation_for_dataset(self, run_id: int, eval_dataset, dataset_name: str, output_dir: str = None) -> Dict:
         """Run a single evaluation for a specific dataset"""
         print(f"  🧪 Running evaluation {run_id + 1}/{self.args.num_runs} for {dataset_name}")
         
@@ -736,8 +751,8 @@ class CodeEvaluator:
         results = {
             "run_id": run_id,
             "metrics": metrics,
-            "stop_rate": stop_rate,
-            "avg_sequence_length": sequence_lengths.mean(),
+            "stop_rate": float(stop_rate),
+            "avg_sequence_length": float(sequence_lengths.mean()),
             "total_samples": len(decoded_responses),
         }
         
@@ -756,7 +771,125 @@ class CodeEvaluator:
             }
             results["detailed"] = detailed_results
             
+            # Save individual run results immediately if output_dir is provided
+            if output_dir:
+                self.save_single_run_results(results, output_dir)
+            
         return results
+    
+    def save_single_run_results(self, run_result: Dict, output_dir: str):
+        """Save results for a single evaluation run immediately"""
+        if not self.args.save_results or "detailed" not in run_result:
+            return
+            
+        os.makedirs(output_dir, exist_ok=True)
+        
+        run_id = run_result["run_id"]
+        detailed = run_result["detailed"]
+        run_metrics = run_result["metrics"]
+        
+        # Extract tool information from infos
+        num_calls, timeouts, tool_errors, tool_outputs, tool_runtimes, tool_calleds = detailed["infos"]
+        
+        # Create failure reasons
+        failure_reasons = []
+        for i in range(len(detailed["responses"])):
+            reasons = []
+            if detailed["finish_reasons"][i] != "stop":
+                reasons.append(f"non_stop_finish({detailed['finish_reasons'][i]})")
+            if timeouts[i]:
+                reasons.append("tool_timeout")
+            if tool_errors[i]:
+                reasons.append("tool_error")
+            if detailed["scores"][i] <= 0:
+                reasons.append("incorrect_solution")
+            failure_reasons.append("; ".join(reasons) if reasons else "none")
+        
+        # Extract prompt text from messages if available
+        prompt_texts = []
+        if detailed["messages"] is not None:
+            for msgs in detailed["messages"]:
+                # Extract the user prompt (typically the last user message or all but assistant)
+                user_msgs = [msg["content"] for msg in msgs if msg["role"] == "user"]
+                prompt_texts.append(" | ".join(user_msgs))
+        else:
+            # Fallback to decoded prompts
+            prompt_texts = detailed["prompts"]
+        
+        # Save as CSV with comprehensive information
+        df_data = {
+            "prompt": prompt_texts,
+            "response": detailed["responses"],
+            "ground_truth": detailed["ground_truths"],
+            "score": detailed["scores"],
+            "finish_reason": detailed["finish_reasons"],
+            "failure_reason": failure_reasons,
+            "dataset_source": detailed["datasets"],
+            "sequence_length": detailed["sequence_lengths"],
+            "num_tool_calls": num_calls,
+            "tool_timeout": timeouts,
+            "tool_error": tool_errors,
+            "tool_output": tool_outputs,
+            "tool_runtime": tool_runtimes,
+            "tool_called": tool_calleds,
+        }
+        
+        # Add metric columns that are available
+        available_metrics = ["manufactoria_all_pass", "manufactoria_pass_rate", "format_scores"]
+        for metric in available_metrics:
+            if metric in run_metrics:
+                df_data[metric] = [run_metrics[metric]] * len(detailed["responses"])
+        
+        df = pd.DataFrame(df_data)
+        csv_path = os.path.join(output_dir, f"run_{run_id}_detailed.csv")
+        df.to_csv(csv_path, index=False)
+        
+        # Save a summary CSV with pass rates by dataset
+        dataset_summary = []
+        unique_datasets = df["dataset_source"].unique()
+        for dataset in unique_datasets:
+            dataset_df = df[df["dataset_source"] == dataset]
+            summary_row = {
+                "dataset": dataset,
+                "total_samples": len(dataset_df),
+                "avg_score": dataset_df["score"].mean(),
+                "avg_tool_calls": dataset_df["num_tool_calls"].mean(),
+                "tool_timeout_rate": dataset_df["tool_timeout"].mean(),
+                "tool_error_rate": dataset_df["tool_error"].mean(),
+                "avg_sequence_length": dataset_df["sequence_length"].mean(),
+            }
+            
+            # Add available metrics to the summary
+            for metric in available_metrics:
+                if metric in df.columns:
+                    summary_row[metric] = dataset_df[metric].mean()
+            
+            dataset_summary.append(summary_row)
+        
+        summary_df = pd.DataFrame(dataset_summary)
+        
+        # Add overall summary row
+        overall_summary = {
+            "dataset": "OVERALL",
+            "total_samples": len(df),
+            "avg_score": df["score"].mean(),
+            "avg_tool_calls": df["num_tool_calls"].mean(),
+            "tool_timeout_rate": df["tool_timeout"].mean(),
+            "tool_error_rate": df["tool_error"].mean(),
+            "avg_sequence_length": df["sequence_length"].mean(),
+        }
+        
+        # Add available metrics to overall summary
+        for metric in available_metrics:
+            if metric in df.columns:
+                overall_summary[metric] = df[metric].mean()
+        
+        summary_df = pd.concat([summary_df, pd.DataFrame([overall_summary])], ignore_index=True)
+        
+        summary_csv_path = os.path.join(output_dir, f"run_{run_id}_summary.csv")
+        summary_df.to_csv(summary_csv_path, index=False)
+        
+        print(f"💾 Run {run_id} results saved to {output_dir}")
     
     def create_combined_summary(self, all_dataset_results: Dict) -> Dict:
         """Create a combined summary across all datasets"""
@@ -829,7 +962,7 @@ class CodeEvaluator:
         return aggregated
     
     def save_dataset_results(self, results: Dict, output_dir: str, folder_name: str):
-        """Save evaluation results for a single dataset"""
+        """Save aggregated evaluation results for a single dataset (individual runs already saved)"""
         if not self.args.save_results:
             return
             
@@ -849,7 +982,7 @@ class CodeEvaluator:
                 return [convert_numpy(item) for item in obj]
             return obj
             
-        # Create separate results for metrics and samples
+        # Create aggregated metrics results (without detailed samples since they're already saved)
         metrics_results = {
             "num_runs": results["num_runs"],
             "metrics": results["metrics"],
@@ -873,118 +1006,7 @@ class CodeEvaluator:
         with open(os.path.join(output_dir, "aggregated_metrics.json"), "w") as f:
             json.dump(convert_numpy(metrics_results), f, indent=2)
         
-        # Save detailed samples separately for each run
-        samples_results = {
-            "num_runs": results["num_runs"],
-            "individual_runs": []
-        }
-        
-        for run_result in results["individual_runs"]:
-            if "detailed" in run_result:
-                run_samples = {
-                    "run_id": run_result["run_id"],
-                    "total_samples": run_result["total_samples"],
-                    "detailed": run_result["detailed"]
-                }
-                samples_results["individual_runs"].append(run_samples)
-        
-        # Save detailed results for each run
-        for run_result in results["individual_runs"]:
-            if "detailed" in run_result:
-                run_id = run_result["run_id"]
-                detailed = run_result["detailed"]
-                
-                # Extract tool information from infos
-                num_calls, timeouts, tool_errors, tool_outputs, tool_runtimes, tool_calleds = detailed["infos"]
-                
-                # Calculate pass rate (score > 0 means passed)
-                scores_array = np.array(detailed["scores"])
-                pass_rate = (scores_array > 0).mean()
-                
-                # Create failure reasons
-                failure_reasons = []
-                for i in range(len(detailed["responses"])):
-                    reasons = []
-                    if detailed["finish_reasons"][i] != "stop":
-                        reasons.append(f"non_stop_finish({detailed['finish_reasons'][i]})")
-                    if timeouts[i]:
-                        reasons.append("tool_timeout")
-                    if tool_errors[i]:
-                        reasons.append("tool_error")
-                    if detailed["scores"][i] <= 0:
-                        reasons.append("incorrect_solution")
-                    failure_reasons.append("; ".join(reasons) if reasons else "none")
-                
-                # Extract prompt text from messages if available
-                prompt_texts = []
-                if detailed["messages"] is not None:
-                    for msgs in detailed["messages"]:
-                        # Extract the user prompt (typically the last user message or all but assistant)
-                        user_msgs = [msg["content"] for msg in msgs if msg["role"] == "user"]
-                        prompt_texts.append(" | ".join(user_msgs))
-                else:
-                    # Fallback to decoded prompts
-                    prompt_texts = detailed["prompts"]
-                
-                # Save as CSV with comprehensive information
-                df_data = {
-                    "prompt": prompt_texts,
-                    "response": detailed["responses"],
-                    "ground_truth": detailed["ground_truths"],
-                    "score": detailed["scores"],
-                    "passed": scores_array > 0,
-                    "finish_reason": detailed["finish_reasons"],
-                    "failure_reason": failure_reasons,
-                    "dataset_source": detailed["datasets"],
-                    "sequence_length": detailed["sequence_lengths"],
-                    "num_tool_calls": num_calls,
-                    "tool_timeout": timeouts,
-                    "tool_error": tool_errors,
-                    "tool_output": tool_outputs,
-                    "tool_runtime": tool_runtimes,
-                    "tool_called": tool_calleds,
-                }
-                
-                df = pd.DataFrame(df_data)
-                csv_path = os.path.join(output_dir, f"run_{run_id}_detailed.csv")
-                df.to_csv(csv_path, index=False)
-                
-                # Save a summary CSV with pass rates by dataset
-                dataset_summary = []
-                unique_datasets = df["dataset_source"].unique()
-                for dataset in unique_datasets:
-                    dataset_df = df[df["dataset_source"] == dataset]
-                    dataset_pass_rate = dataset_df["passed"].mean()
-                    dataset_summary.append({
-                        "dataset": dataset,
-                        "total_samples": len(dataset_df),
-                        "passed_samples": dataset_df["passed"].sum(),
-                        "pass_rate": dataset_pass_rate,
-                        "avg_score": dataset_df["score"].mean(),
-                        "avg_tool_calls": dataset_df["num_tool_calls"].mean(),
-                        "tool_timeout_rate": dataset_df["tool_timeout"].mean(),
-                        "tool_error_rate": dataset_df["tool_error"].mean(),
-                    })
-                
-                summary_df = pd.DataFrame(dataset_summary)
-                
-                # Add overall summary row
-                overall_summary = {
-                    "dataset": "OVERALL",
-                    "total_samples": len(df),
-                    "passed_samples": df["passed"].sum(),
-                    "pass_rate": pass_rate,
-                    "avg_score": df["score"].mean(),
-                    "avg_tool_calls": df["num_tool_calls"].mean(),
-                    "tool_timeout_rate": df["tool_timeout"].mean(),
-                    "tool_error_rate": df["tool_error"].mean(),
-                }
-                summary_df = pd.concat([summary_df, pd.DataFrame([overall_summary])], ignore_index=True)
-                
-                summary_csv_path = os.path.join(output_dir, f"run_{run_id}_summary.csv")
-                summary_df.to_csv(summary_csv_path, index=False)
-        
-        print(f"💾 Results saved to {output_dir}")
+        print(f"💾 Aggregated results saved to {output_dir}")
         print(f"  📂 Dataset folder: {folder_name}")
         
     def save_combined_results(self, combined_results: Dict):
@@ -1026,7 +1048,7 @@ def print_results_summary(results: Dict):
     print()
     
     print("📊 KEY METRICS:")
-    key_metrics = ["verifiable_reward", "verifiable_correct_rate", "format_scores"]
+    key_metrics = ["avg_score", "format_scores"]
     
     for metric in key_metrics:
         if metric in results["metrics"]:
@@ -1064,10 +1086,10 @@ def print_results_summary(results: Dict):
         print(f"\n  📁 {dataset_name}:")
         
         # Show main reward metric
-        reward_metric = f"{dataset_name}/verifiable_reward"
+        reward_metric = f"{dataset_name}/avg_score"
         if reward_metric in results["metrics"]:
             stats = results["metrics"][reward_metric]
-            print(f"    Verifiable Reward: {stats['mean']:.4f} ± {stats['std']:.4f}")
+            print(f"    Average Score: {stats['mean']:.4f} ± {stats['std']:.4f}")
         
         # Show Manufactoria-specific metrics if available
         for manufactoria_metric in ["manufactoria_all_pass", "manufactoria_pass_rate"]:
@@ -1091,7 +1113,7 @@ def print_combined_results_summary(results: Dict):
     print()
     
     print("📊 COMBINED KEY METRICS:")
-    key_metrics = ["verifiable_reward", "verifiable_correct_rate", "format_scores"]
+    key_metrics = ["avg_score", "format_scores"]
     
     for metric in key_metrics:
         if metric in results["combined_metrics"]:
@@ -1108,13 +1130,9 @@ def print_combined_results_summary(results: Dict):
             print(f"    Runs completed: {dataset_results['num_runs']}")
             
             # Show main metrics for this dataset
-            if "verifiable_reward" in dataset_results["metrics"]:
-                reward_stats = dataset_results["metrics"]["verifiable_reward"]
-                print(f"    Verifiable Reward: {reward_stats['mean']:.4f} ± {reward_stats['std']:.4f}")
-            
-            if "verifiable_correct_rate" in dataset_results["metrics"]:
-                correct_stats = dataset_results["metrics"]["verifiable_correct_rate"]
-                print(f"    Correct Rate: {correct_stats['mean']:.4f} ± {correct_stats['std']:.4f}")
+            if "avg_score" in dataset_results["metrics"]:
+                reward_stats = dataset_results["metrics"]["avg_score"]
+                print(f"    Average Score: {reward_stats['mean']:.4f} ± {reward_stats['std']:.4f}")
             
             # Show Manufactoria-specific metrics if available
             for manufactoria_metric in ["manufactoria_all_pass", "manufactoria_pass_rate"]:
