@@ -954,8 +954,8 @@ class ManufactoriaVerifier(VerifierFunction):
                     
             reasoning = "; ".join(reasoning_parts) if reasoning_parts else None
             additional_metrics = {
-                "manufactoria_all_pass": all_pass_score,
-                "manufactoria_pass_rate": pass_rate_score
+                "all_pass": all_pass_score,
+                "pass_rate": pass_rate_score
             }
             return VerificationResult(score=final_score, reasoning=reasoning, additional_metrics=additional_metrics)
             

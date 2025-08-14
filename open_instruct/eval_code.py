@@ -63,8 +63,6 @@ class EvalArgs:
     """Whether to use the last N samples from each evaluation dataset instead of the first N."""
     
     # Evaluation configuration
-    num_eval_samples: Optional[int] = None
-    """Number of samples to evaluate on (None means use all samples)"""
     num_runs: int = 1
     """Number of evaluation runs to perform"""
     seed: int = 42
@@ -133,8 +131,6 @@ class EvalArgs:
     """API URL for Manufactoria verification"""
     manufactoria_max_execution_time: float = 1.0
     """Maximum execution time for Manufactoria verification"""
-    manufactoria_scoring_mode: str = "all_pass"
-    """Scoring mode for Manufactoria verifier: 'all_pass' (binary) or 'pass_rate' (gradual)"""
     
     # LLM judge configuration
     llm_judge_model: str = "azure/gpt-4o-mini-standard"
@@ -170,38 +166,35 @@ class CodeEvaluator:
         self.reward_fn_mapping = None
         self.eval_dataset = None
         
-        # Generate dataset folder name for organizing results
-        self.dataset_folder_name = self.generate_dataset_folder_name()
-        self.dataset_output_dir = os.path.join(self.args.output_dir, self.dataset_folder_name)
+        # Parse dataset configurations for individual processing
+        self.dataset_configs = self.parse_dataset_configs()
     
-    def generate_dataset_folder_name(self) -> str:
-        """Generate a folder name based on the dataset mixer configuration"""
-        dataset_names = []
+    def parse_dataset_configs(self) -> List[Dict]:
+        """Parse dataset_mixer_eval_list into individual dataset configurations"""
+        configs = []
         
-        # Extract dataset names from dataset_mixer_eval_list
         for i in range(0, len(self.args.dataset_mixer_eval_list), 2):
             dataset_name = self.args.dataset_mixer_eval_list[i]
-            # Clean up dataset name for folder usage
-            clean_name = dataset_name.replace("/", "_").replace("-", "_")
-            # Take just the last part if it's a long path
-            if "_" in clean_name:
-                clean_name = clean_name.split("_")[-1]
-            dataset_names.append(clean_name)
+            frac_or_num_samples = self.args.dataset_mixer_eval_list[i+1]
+            
+            # Clean up dataset name for folder usage            
+            folder_name = dataset_name.split("/")[-1].replace("-", "_")
+            
+            configs.append({
+                "dataset_name": dataset_name,
+                "frac_or_num_samples": frac_or_num_samples,
+                "folder_name": folder_name,
+                "output_dir": os.path.join(self.args.output_dir, folder_name)
+            })
         
-        # Combine dataset names, but keep it reasonable length
-        if len(dataset_names) == 1:
-            folder_name = dataset_names[0]
-        elif len(dataset_names) <= 3:
-            folder_name = "_".join(dataset_names)
-        else:
-            # If too many datasets, use first 2 and add "plus_N_more"
-            folder_name = "_".join(dataset_names[:2]) + f"_plus_{len(dataset_names)-2}_more"
-        
-        # Add number of eval samples if specified
-        if self.args.num_eval_samples is not None:
-            folder_name += f"_n{self.args.num_eval_samples}"
-        
-        return folder_name
+        return configs
+    
+    def clean_dataset_name(self, dataset_name: str) -> str:
+        """Clean dataset name for use as folder name"""
+        clean_name = dataset_name.replace("/", "_").replace("-", "_")
+        if "_" in clean_name:
+            clean_name = clean_name.split("_")[-1]
+        return clean_name
         
     def setup(self):
         """Initialize all components needed for evaluation"""
@@ -513,16 +506,195 @@ class CodeEvaluator:
 
         return scores, metrics
     
-    async def run_single_evaluation(self, run_id: int) -> Dict:
-        """Run a single evaluation"""
-        print(f"🧪 Running evaluation {run_id + 1}/{self.args.num_runs}")
+
+    
+    def check_existing_runs(self, dataset_output_dir: str) -> int:
+        """Check how many evaluation runs already exist in the dataset-specific output directory"""
+        if not os.path.exists(dataset_output_dir):
+            return 0
         
-        # Select evaluation samples
-        # Use all samples if num_eval_samples is None
-        if self.args.num_eval_samples is None:
-            eval_dataset_subset = self.eval_dataset
-        else:
-            eval_dataset_subset = self.eval_dataset[:self.args.num_eval_samples]
+        existing_runs = 0
+        # Check for existing detailed CSV files (run_N_detailed.csv pattern)
+        for filename in os.listdir(dataset_output_dir):
+            if filename.startswith("run_") and filename.endswith("_detailed.csv"):
+                try:
+                    # Extract run ID from filename
+                    run_id = int(filename.split("_")[1])
+                    existing_runs = max(existing_runs, run_id + 1)
+                except (ValueError, IndexError):
+                    continue
+        
+        return existing_runs
+
+    def load_existing_results(self, num_existing_runs: int, dataset_output_dir: str) -> List[Dict]:
+        """Load existing evaluation results from CSV files"""
+        existing_results = []
+        
+        for run_id in range(num_existing_runs):
+            # Load metrics from summary CSV if available
+            summary_csv_path = os.path.join(dataset_output_dir, f"run_{run_id}_summary.csv")
+            if os.path.exists(summary_csv_path):
+                summary_df = pd.read_csv(summary_csv_path)
+                overall_row = summary_df[summary_df["dataset"] == "OVERALL"].iloc[0]
+                
+                # Create a basic result structure with key metrics
+                result = {
+                    "run_id": run_id,
+                    "metrics": {
+                        "verifiable_correct_rate": overall_row["pass_rate"],
+                        "verifiable_reward": overall_row["avg_score"],
+                    },
+                    "stop_rate": 1.0 - overall_row["tool_timeout_rate"] - overall_row["tool_error_rate"],  # Approximation
+                    "avg_sequence_length": 0.0,  # Not available in summary
+                    "total_samples": int(overall_row["total_samples"]),
+                }
+                
+                # Add per-dataset metrics if available
+                for _, row in summary_df.iterrows():
+                    if row["dataset"] != "OVERALL":
+                        dataset_name = row["dataset"].split('/')[-1]
+                        result["metrics"][f"{dataset_name}/verifiable_reward"] = row["avg_score"]
+                        result["metrics"][f"{dataset_name}/verifiable_correct_rate"] = row["pass_rate"]
+                
+                existing_results.append(result)
+            else:
+                print(f"⚠️  Warning: Could not find summary file for run {run_id}")
+        
+        return existing_results
+
+    async def run_evaluation(self) -> Dict:
+        """Run multiple evaluation runs for each dataset separately and aggregate results"""
+        print(f"🎯 Starting evaluation with {self.args.num_runs} runs for {len(self.dataset_configs)} datasets")
+        
+        all_dataset_results = {}
+        
+        for dataset_config in self.dataset_configs:
+            dataset_name = dataset_config["dataset_name"]
+            folder_name = dataset_config["folder_name"]
+            output_dir = dataset_config["output_dir"]
+            
+            print(f"\n📂 Processing dataset: {dataset_name}")
+            print(f"📁 Folder: {folder_name}")
+            print(f"📍 Output: {output_dir}")
+            
+            # Check for existing runs for this specific dataset
+            existing_runs = self.check_existing_runs(output_dir)
+            if existing_runs > 0:
+                print(f"📁 Found {existing_runs} existing runs for {dataset_name}")
+                
+                if existing_runs >= self.args.num_runs:
+                    print(f"✅ Already have {existing_runs} runs (requested {self.args.num_runs}). Skipping.")
+                    # Load existing results and add to aggregate
+                    existing_results = self.load_existing_results(existing_runs, output_dir)
+                    aggregated = self.aggregate_results(existing_results)
+                    all_dataset_results[dataset_name] = aggregated
+                    continue
+                else:
+                    remaining_runs = self.args.num_runs - existing_runs
+                    print(f"🔄 Need {remaining_runs} more runs to reach {self.args.num_runs} total")
+                    start_run_id = existing_runs
+            else:
+                print(f"🎯 Starting fresh evaluation with {self.args.num_runs} runs")
+                start_run_id = 0
+                remaining_runs = self.args.num_runs
+            
+            # Run evaluation for this specific dataset
+            dataset_results = await self.run_single_dataset_evaluation(
+                dataset_config, existing_runs, start_run_id, remaining_runs
+            )
+            all_dataset_results[dataset_name] = dataset_results
+        
+        # Create combined summary
+        return self.create_combined_summary(all_dataset_results)
+    
+    async def run_single_dataset_evaluation(
+        self, 
+        dataset_config: Dict, 
+        existing_runs: int, 
+        start_run_id: int, 
+        remaining_runs: int
+    ) -> Dict:
+        """Run evaluation for a single dataset"""
+        dataset_name = dataset_config["dataset_name"]
+        output_dir = dataset_config["output_dir"]
+        
+        all_results = []
+        
+        # Load existing results if any
+        if existing_runs > 0:
+            existing_results = self.load_existing_results(existing_runs, output_dir)
+            all_results.extend(existing_results)
+        
+        # Create dataset-specific evaluation dataset
+        single_dataset_eval = await self.create_single_dataset_eval(dataset_config)
+        
+        # Run additional evaluations
+        for i in range(remaining_runs):
+            run_id = start_run_id + i
+            result = await self.run_single_evaluation_for_dataset(run_id, single_dataset_eval, dataset_name)
+            all_results.append(result)
+            
+            # Print summary for this run
+            metrics = result["metrics"]
+            print(f"  Run {run_id + 1} Summary:")
+            print(f"    Verifiable Reward: {metrics.get('verifiable_reward', 0.0):.3f}")
+            # print(f"    Correct Rate: {metrics.get('verifiable_correct_rate', 0.0):.3f}")
+            
+            # Show both Manufactoria metrics if available
+            if 'manufactoria_all_pass' in metrics:
+                print(f"    Manufactoria All Pass: {metrics['manufactoria_all_pass']:.3f}")
+            if 'manufactoria_pass_rate' in metrics:
+                print(f"    Manufactoria Pass Rate: {metrics['manufactoria_pass_rate']:.3f}")
+            
+            print(f"    Stop Rate: {result['stop_rate']:.3f}")
+        
+        # Aggregate results for this dataset
+        aggregated = self.aggregate_results(all_results)
+        
+        # Save results for this dataset
+        self.save_dataset_results(aggregated, output_dir, dataset_config["folder_name"])
+        
+        return aggregated
+    
+    async def create_single_dataset_eval(self, dataset_config: Dict):
+        """Create evaluation dataset for a single dataset"""
+        # Create a temporary dataset mixer list with just this dataset
+        single_dataset_mixer = [dataset_config["dataset_name"], dataset_config["frac_or_num_samples"]]
+        
+        # Use the same dataset loading logic but for single dataset
+        tc = self.tokenizer_config
+        eval_transform_fn_args = [
+            {},
+            {"need_contain_labels": True},
+        ]
+        
+        single_eval_dataset = get_cached_dataset_tulu(
+            single_dataset_mixer,
+            self.args.dataset_mixer_eval_list_splits,
+            tc,
+            self.args.dataset_transform_fn,
+            eval_transform_fn_args,
+            hf_entity=self.args.hf_entity,
+            dataset_cache_mode=self.args.dataset_cache_mode,
+            dataset_config_hash=self.args.dataset_config_eval_hash,
+            dataset_local_cache_dir=self.args.dataset_local_cache_dir,
+            dataset_skip_cache=self.args.dataset_skip_cache,
+            use_last_n=self.args.use_last_n_eval_samples,
+        )
+        
+        # Add dataset source tracking
+        dataset_name = dataset_config["dataset_name"]
+        sources = [dataset_name] * len(single_eval_dataset)
+        single_eval_dataset = single_eval_dataset.add_column("__dataset_source__", sources)
+        
+        return single_eval_dataset
+    
+    async def run_single_evaluation_for_dataset(self, run_id: int, eval_dataset, dataset_name: str) -> Dict:
+        """Run a single evaluation for a specific dataset"""
+        print(f"  🧪 Running evaluation {run_id + 1}/{self.args.num_runs} for {dataset_name}")
+        
+        # Use all samples from the dataset (already sized according to dataset_mixer_eval_list)
+        eval_dataset_subset = eval_dataset
             
         eval_prompt_token_ids = eval_dataset_subset[INPUT_IDS_PROMPT_KEY]
         eval_ground_truths = eval_dataset_subset[GROUND_TRUTHS_KEY]
@@ -535,7 +707,7 @@ class CodeEvaluator:
             eval_messages = eval_dataset_subset["messages"]
         
         # Generate responses
-        with Timer("Generating responses"):
+        with Timer(f"Generating responses for {dataset_name}"):
             response_ids, finish_reasons, masks, infos = self.generate_responses(eval_prompt_token_ids)
         
         # Decode responses
@@ -545,7 +717,7 @@ class CodeEvaluator:
         decoded_prompts = self.tokenizer.batch_decode(eval_prompt_token_ids, skip_special_tokens=True)
         
         # Compute rewards
-        with Timer("Computing rewards"):
+        with Timer(f"Computing rewards for {dataset_name}"):
             scores, metrics = await self.compute_rewards(
                 response_ids,
                 decoded_responses, 
@@ -579,120 +751,41 @@ class CodeEvaluator:
                 "finish_reasons": finish_reasons,
                 "datasets": eval_original_sources,
                 "sequence_lengths": sequence_lengths.tolist(),
-                "infos": infos,  # Contains tool call information
-                "messages": eval_messages,  # Original conversation messages
+                "infos": infos,
+                "messages": eval_messages,
             }
             results["detailed"] = detailed_results
             
         return results
     
-    def check_existing_runs(self) -> int:
-        """Check how many evaluation runs already exist in the dataset-specific output directory"""
-        if not os.path.exists(self.dataset_output_dir):
-            return 0
+    def create_combined_summary(self, all_dataset_results: Dict) -> Dict:
+        """Create a combined summary across all datasets"""
+        combined_summary = {
+            "datasets": list(all_dataset_results.keys()),
+            "num_datasets": len(all_dataset_results),
+            "per_dataset_results": all_dataset_results,
+            "combined_metrics": {}
+        }
         
-        existing_runs = 0
-        # Check for existing detailed CSV files (run_N_detailed.csv pattern)
-        for filename in os.listdir(self.dataset_output_dir):
-            if filename.startswith("run_") and filename.endswith("_detailed.csv"):
-                try:
-                    # Extract run ID from filename
-                    run_id = int(filename.split("_")[1])
-                    existing_runs = max(existing_runs, run_id + 1)
-                except (ValueError, IndexError):
-                    continue
+        # Aggregate metrics across all datasets
+        all_metrics = defaultdict(list)
+        for dataset_name, dataset_results in all_dataset_results.items():
+            for metric_name, metric_stats in dataset_results["metrics"].items():
+                if isinstance(metric_stats, dict) and "mean" in metric_stats:
+                    all_metrics[metric_name].append(metric_stats["mean"])
         
-        return existing_runs
-
-    def load_existing_results(self, num_existing_runs: int) -> List[Dict]:
-        """Load existing evaluation results from CSV files"""
-        existing_results = []
-        
-        for run_id in range(num_existing_runs):
-            # Load metrics from summary CSV if available
-            summary_csv_path = os.path.join(self.dataset_output_dir, f"run_{run_id}_summary.csv")
-            if os.path.exists(summary_csv_path):
-                summary_df = pd.read_csv(summary_csv_path)
-                overall_row = summary_df[summary_df["dataset"] == "OVERALL"].iloc[0]
-                
-                # Create a basic result structure with key metrics
-                result = {
-                    "run_id": run_id,
-                    "metrics": {
-                        "verifiable_correct_rate": overall_row["pass_rate"],
-                        "verifiable_reward": overall_row["avg_score"],
-                    },
-                    "stop_rate": 1.0 - overall_row["tool_timeout_rate"] - overall_row["tool_error_rate"],  # Approximation
-                    "avg_sequence_length": 0.0,  # Not available in summary
-                    "total_samples": int(overall_row["total_samples"]),
+        # Compute overall statistics
+        for metric_name, values in all_metrics.items():
+            if values:
+                combined_summary["combined_metrics"][metric_name] = {
+                    "mean": np.mean(values),
+                    "std": np.std(values),
+                    "min": np.min(values),
+                    "max": np.max(values),
+                    "datasets": list(all_dataset_results.keys())
                 }
-                
-                # Add per-dataset metrics if available
-                for _, row in summary_df.iterrows():
-                    if row["dataset"] != "OVERALL":
-                        dataset_name = row["dataset"].split('/')[-1]
-                        result["metrics"][f"{dataset_name}/verifiable_reward"] = row["avg_score"]
-                        result["metrics"][f"{dataset_name}/verifiable_correct_rate"] = row["pass_rate"]
-                
-                existing_results.append(result)
-            else:
-                print(f"⚠️  Warning: Could not find summary file for run {run_id}")
         
-        return existing_results
-
-    def load_and_aggregate_existing_results(self) -> Dict:
-        """Load all existing results and return aggregated results"""
-        existing_runs = self.check_existing_runs()
-        existing_results = self.load_existing_results(existing_runs)
-        return self.aggregate_results(existing_results)
-
-    async def run_evaluation(self) -> Dict:
-        """Run multiple evaluation runs and aggregate results"""
-        # Display dataset folder information
-        print(f"📂 Dataset folder: {self.dataset_folder_name}")
-        print(f"📍 Results will be saved to: {self.dataset_output_dir}")
-        
-        # Check for existing runs
-        existing_runs = self.check_existing_runs()
-        if existing_runs > 0:
-            print(f"📁 Found {existing_runs} existing runs for this dataset configuration")
-            
-            if existing_runs >= self.args.num_runs:
-                print(f"✅ Already have {existing_runs} runs (requested {self.args.num_runs}). No additional runs needed.")
-                # Load existing results and return aggregated
-                return self.load_and_aggregate_existing_results()
-            else:
-                remaining_runs = self.args.num_runs - existing_runs
-                print(f"🔄 Need {remaining_runs} more runs to reach {self.args.num_runs} total")
-                start_run_id = existing_runs
-        else:
-            print(f"🎯 Starting evaluation with {self.args.num_runs} runs for this dataset")
-            start_run_id = 0
-            remaining_runs = self.args.num_runs
-        
-        all_results = []
-        
-        # Load existing results if any
-        if existing_runs > 0:
-            existing_results = self.load_existing_results(existing_runs)
-            all_results.extend(existing_results)
-        
-        # Run additional evaluations
-        for i in range(remaining_runs):
-            run_id = start_run_id + i
-            result = await self.run_single_evaluation(run_id)
-            all_results.append(result)
-            
-            # Print summary for this run
-            metrics = result["metrics"]
-            print(f"Run {run_id + 1} Summary:")
-            print(f"  Verifiable Reward: {metrics.get('verifiable_reward', 0.0):.3f}")
-            print(f"  Correct Rate: {metrics.get('verifiable_correct_rate', 0.0):.3f}")
-            print(f"  Stop Rate: {result['stop_rate']:.3f}")
-            print()
-        
-        # Aggregate results across runs
-        return self.aggregate_results(all_results)
+        return combined_summary
     
     def aggregate_results(self, all_results: List[Dict]) -> Dict:
         """Aggregate results from multiple runs"""
@@ -735,12 +828,12 @@ class CodeEvaluator:
         
         return aggregated
     
-    def save_results(self, results: Dict):
-        """Save evaluation results to files"""
+    def save_dataset_results(self, results: Dict, output_dir: str, folder_name: str):
+        """Save evaluation results for a single dataset"""
         if not self.args.save_results:
             return
             
-        os.makedirs(self.dataset_output_dir, exist_ok=True)
+        os.makedirs(output_dir, exist_ok=True)
         
         # Convert numpy types to Python types for JSON serialization
         def convert_numpy(obj):
@@ -755,7 +848,7 @@ class CodeEvaluator:
             elif isinstance(obj, list):
                 return [convert_numpy(item) for item in obj]
             return obj
-        
+            
         # Create separate results for metrics and samples
         metrics_results = {
             "num_runs": results["num_runs"],
@@ -777,7 +870,7 @@ class CodeEvaluator:
             metrics_results["individual_runs"].append(run_metrics)
         
         # Save aggregated metrics (without samples)
-        with open(os.path.join(self.dataset_output_dir, "aggregated_metrics.json"), "w") as f:
+        with open(os.path.join(output_dir, "aggregated_metrics.json"), "w") as f:
             json.dump(convert_numpy(metrics_results), f, indent=2)
         
         # Save detailed samples separately for each run
@@ -794,11 +887,6 @@ class CodeEvaluator:
                     "detailed": run_result["detailed"]
                 }
                 samples_results["individual_runs"].append(run_samples)
-        
-        # Save sample outputs (only if there are detailed results)
-        if samples_results["individual_runs"]:
-            with open(os.path.join(self.dataset_output_dir, "aggregated_samples.json"), "w") as f:
-                json.dump(convert_numpy(samples_results), f, indent=2)
         
         # Save detailed results for each run
         for run_result in results["individual_runs"]:
@@ -858,7 +946,7 @@ class CodeEvaluator:
                 }
                 
                 df = pd.DataFrame(df_data)
-                csv_path = os.path.join(self.dataset_output_dir, f"run_{run_id}_detailed.csv")
+                csv_path = os.path.join(output_dir, f"run_{run_id}_detailed.csv")
                 df.to_csv(csv_path, index=False)
                 
                 # Save a summary CSV with pass rates by dataset
@@ -893,14 +981,38 @@ class CodeEvaluator:
                 }
                 summary_df = pd.concat([summary_df, pd.DataFrame([overall_summary])], ignore_index=True)
                 
-                summary_csv_path = os.path.join(self.dataset_output_dir, f"run_{run_id}_summary.csv")
+                summary_csv_path = os.path.join(output_dir, f"run_{run_id}_summary.csv")
                 summary_df.to_csv(summary_csv_path, index=False)
         
-        print(f"💾 Results saved to {self.dataset_output_dir}")
-        print(f"  📂 Dataset folder: {self.dataset_folder_name}")
-        print(f"  📊 Metrics: aggregated_metrics.json")
-        print(f"  📝 Samples: aggregated_samples.json")
-        print(f"  📈 Per-run CSVs: run_N_detailed.csv, run_N_summary.csv")
+        print(f"💾 Results saved to {output_dir}")
+        print(f"  📂 Dataset folder: {folder_name}")
+        
+    def save_combined_results(self, combined_results: Dict):
+        """Save combined results across all datasets"""
+        if not self.args.save_results:
+            return
+            
+        os.makedirs(self.args.output_dir, exist_ok=True)
+        
+        # Convert numpy types to Python types for JSON serialization
+        def convert_numpy(obj):
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, (np.int64, np.int32)):
+                return int(obj)
+            elif isinstance(obj, (np.float64, np.float32)):
+                return float(obj)
+            elif isinstance(obj, dict):
+                return {k: convert_numpy(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_numpy(item) for item in obj]
+            return obj
+        
+        # Save combined summary
+        with open(os.path.join(self.args.output_dir, "combined_summary.json"), "w") as f:
+            json.dump(convert_numpy(combined_results), f, indent=2)
+        
+        print(f"💾 Combined summary saved to {self.args.output_dir}/combined_summary.json")
 
 
 def print_results_summary(results: Dict):
@@ -968,6 +1080,52 @@ def print_results_summary(results: Dict):
     print("="*60)
 
 
+def print_combined_results_summary(results: Dict):
+    """Print a formatted summary of combined results across datasets"""
+    print("\n" + "="*80)
+    print("🎯 COMBINED EVALUATION RESULTS SUMMARY")
+    print("="*80)
+    
+    print(f"Number of datasets: {results['num_datasets']}")
+    print(f"Datasets evaluated: {', '.join(results['datasets'])}")
+    print()
+    
+    print("📊 COMBINED KEY METRICS:")
+    key_metrics = ["verifiable_reward", "verifiable_correct_rate", "format_scores"]
+    
+    for metric in key_metrics:
+        if metric in results["combined_metrics"]:
+            stats = results["combined_metrics"][metric]
+            print(f"  {metric}:")
+            print(f"    Mean across datasets: {stats['mean']:.4f} ± {stats['std']:.4f}")
+            print(f"    Range: [{stats['min']:.4f}, {stats['max']:.4f}]")
+    
+    print("\n🔍 PER-DATASET BREAKDOWN:")
+    for dataset_name in results["datasets"]:
+        if dataset_name in results["per_dataset_results"]:
+            dataset_results = results["per_dataset_results"][dataset_name]
+            print(f"\n  📁 {dataset_name}:")
+            print(f"    Runs completed: {dataset_results['num_runs']}")
+            
+            # Show main metrics for this dataset
+            if "verifiable_reward" in dataset_results["metrics"]:
+                reward_stats = dataset_results["metrics"]["verifiable_reward"]
+                print(f"    Verifiable Reward: {reward_stats['mean']:.4f} ± {reward_stats['std']:.4f}")
+            
+            if "verifiable_correct_rate" in dataset_results["metrics"]:
+                correct_stats = dataset_results["metrics"]["verifiable_correct_rate"]
+                print(f"    Correct Rate: {correct_stats['mean']:.4f} ± {correct_stats['std']:.4f}")
+            
+            # Show Manufactoria-specific metrics if available
+            for manufactoria_metric in ["manufactoria_all_pass", "manufactoria_pass_rate"]:
+                if manufactoria_metric in dataset_results["metrics"]:
+                    stats = dataset_results["metrics"][manufactoria_metric]
+                    display_name = manufactoria_metric.replace("manufactoria_", "").replace("_", " ").title()
+                    print(f"    {display_name}: {stats['mean']:.4f} ± {stats['std']:.4f}")
+    
+    print("="*80)
+
+
 async def main():
     """Main evaluation function"""
     # Set environment variable to avoid tokenizer warnings
@@ -984,12 +1142,19 @@ async def main():
     
     # Initialize evaluator
     evaluator = CodeEvaluator(args, tokenizer_config, model_config)
-    print(f"📂 Dataset configuration: {evaluator.dataset_folder_name}")
+    print(f"📂 Will evaluate {len(evaluator.dataset_configs)} datasets:")
+    for config in evaluator.dataset_configs:
+        print(f"  - {config['dataset_name']} → {config['folder_name']}")
     evaluator.setup()
     
-    # Print actual number of samples after setup
-    actual_samples = len(evaluator.eval_dataset) if args.num_eval_samples is None else args.num_eval_samples
-    print(f"Samples per run: {actual_samples}")
+    # Print sample information based on dataset configuration
+    print("Sample allocation per dataset:")
+    for config in evaluator.dataset_configs:
+        frac_or_num = config['frac_or_num_samples']
+        if "." in frac_or_num:
+            print(f"  - {config['dataset_name']}: {float(frac_or_num)*100:.1f}% of dataset")
+        else:
+            print(f"  - {config['dataset_name']}: {frac_or_num} samples")
     print()
     
     # Ray is already initialized in evaluator.setup()
@@ -997,11 +1162,11 @@ async def main():
     # Run evaluation
     results = await evaluator.run_evaluation()
     
-    # Save results
-    evaluator.save_results(results)
+    # Save combined results
+    evaluator.save_combined_results(results)
     
     # Print summary
-    print_results_summary(results)
+    print_combined_results_summary(results)
     
     # Cleanup
     ray.shutdown()
