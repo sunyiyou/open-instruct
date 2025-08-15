@@ -949,7 +949,7 @@ class CodeEvaluator:
             df_data["manufactoria_pass_rate"] = manufactoria_pass_rate
         else:
             # Fallback to global metrics if per-sample metrics are not available
-            available_metrics = ["manufactoria_all_pass", "manufactoria_pass_rate", "format_scores"]
+            available_metrics = ["manufactoria_all_pass", "manufactoria_pass_rate"]
             for metric in available_metrics:
                 if metric in run_metrics:
                     df_data[metric] = [run_metrics[metric]] * len(detailed["responses"])
@@ -971,12 +971,9 @@ class CodeEvaluator:
                 "tool_timeout_rate": dataset_df["tool_timeout"].mean(),
                 "tool_error_rate": dataset_df["tool_error"].mean(),
                 "avg_sequence_length": dataset_df["sequence_length"].mean(),
+                "manufactoria_all_pass": dataset_df["manufactoria_all_pass"].mean(),
+                "manufactoria_pass_rate": dataset_df["manufactoria_pass_rate"].mean(),
             }
-            
-            # Add available metrics to the summary
-            for metric in available_metrics:
-                if metric in df.columns:
-                    summary_row[metric] = dataset_df[metric].mean()
             
             dataset_summary.append(summary_row)
         
