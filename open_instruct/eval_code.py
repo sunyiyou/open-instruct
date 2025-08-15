@@ -988,12 +988,9 @@ class CodeEvaluator:
             "tool_timeout_rate": df["tool_timeout"].mean(),
             "tool_error_rate": df["tool_error"].mean(),
             "avg_sequence_length": df["sequence_length"].mean(),
+            "manufactoria_all_pass": df["manufactoria_all_pass"].mean(),
+            "manufactoria_pass_rate": df["manufactoria_pass_rate"].mean(),
         }
-        
-        # Add available metrics to overall summary
-        for metric in available_metrics:
-            if metric in df.columns:
-                overall_summary[metric] = df[metric].mean()
         
         summary_df = pd.concat([summary_df, pd.DataFrame([overall_summary])], ignore_index=True)
         
