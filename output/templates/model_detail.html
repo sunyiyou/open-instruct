@@ -1,0 +1,366 @@
+{% extends "base.html" %}
+
+{% block title %}{{ model_name }} - Model Details{% endblock %}
+
+{% block breadcrumb %}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="{{ url_for('home') }}">Home</a></li>
+        <li class="breadcrumb-item active">{{ model_name }}</li>
+    </ol>
+</nav>
+{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-12">
+        <h1 class="display-5 mb-3">
+            <i class="fas fa-brain me-3"></i>
+            {{ model_name }}
+        </h1>
+        <p class="lead text-muted">
+            Comprehensive performance analysis across all evaluated datasets
+        </p>
+    </div>
+</div>
+
+<!-- Model Summary Statistics -->
+<div class="row mb-5">
+    <div class="col-md-3">
+        <div class="card card-metric text-center">
+            <div class="card-body">
+                <div class="metric-value">{{ datasets | length }}</div>
+                <div class="metric-label">
+                    <i class="fas fa-database me-1"></i>Datasets
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card card-metric text-center">
+            <div class="card-body">
+                <div class="metric-value">{{ total_runs }}</div>
+                <div class="metric-label">
+                    <i class="fas fa-play me-1"></i>Total Runs
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card card-metric text-center">
+            <div class="card-body">
+                <div class="metric-value">{{ model_avg_score | round_float(3) }}</div>
+                <div class="metric-label">
+                    <i class="fas fa-trophy me-1"></i>Avg Score
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card card-metric text-center">
+            <div class="card-body">
+                <div class="metric-value">{{ model_score_std | round_float(3) }}</div>
+                <div class="metric-label">
+                    <i class="fas fa-chart-line me-1"></i>Score Std Dev
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Dataset Performance Table -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-list me-2"></i>
+                    Dataset Performance Summary
+                </h5>
+            </div>
+            <div class="card-body">
+                {% if datasets %}
+                <div class="table-responsive">
+                    <table class="table table-hover">
+                        <thead class="table-dark">
+                            <tr>
+                                <th><i class="fas fa-database me-1"></i>Dataset</th>
+                                <th class="text-center"><i class="fas fa-play me-1"></i>Runs</th>
+                                <th class="text-center"><i class="fas fa-trophy me-1"></i>Avg Score</th>
+                                <th class="text-center"><i class="fas fa-chart-line me-1"></i>Score Range</th>
+                                <th class="text-center"><i class="fas fa-cogs me-1"></i>Manufactoria All Pass</th>
+                                <th class="text-center"><i class="fas fa-check-circle me-1"></i>Manufactoria Pass Rate</th>
+                                <th class="text-center"><i class="fas fa-external-link-alt me-1"></i>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for dataset in datasets %}
+                            {% set metrics = dataset.aggregated_metrics.metrics if dataset.aggregated_metrics else {} %}
+                            {% set avg_score = metrics.get('avg_score', {}) %}
+                            {% set manufactoria_all_pass = metrics.get('manufactoria_all_pass', {}) %}
+                            {% set manufactoria_pass_rate = metrics.get('manufactoria_pass_rate', {}) %}
+                            <tr>
+                                <td>
+                                    <div class="d-flex align-items-center">
+                                        <i class="fas fa-database text-info me-2"></i>
+                                        <div>
+                                            <strong>{{ dataset.name }}</strong>
+                                        </div>
+                                    </div>
+                                </td>
+                                <td class="text-center">
+                                    <span class="badge bg-secondary">{{ dataset.num_runs }}</span>
+                                </td>
+                                <td class="text-center">
+                                    {% if avg_score %}
+                                    <span class="{% if avg_score.mean >= 0.8 %}score-excellent{% elif avg_score.mean >= 0.6 %}score-good{% elif avg_score.mean >= 0.4 %}score-fair{% elif avg_score.mean >= 0.2 %}score-poor{% else %}score-bad{% endif %}">
+                                        {{ avg_score.mean | round_float(3) }}
+                                    </span>
+                                    <br>
+                                    <small class="text-muted">±{{ avg_score.std | round_float(3) }}</small>
+                                    {% else %}
+                                    <span class="text-muted">N/A</span>
+                                    {% endif %}
+                                </td>
+                                <td class="text-center">
+                                    {% if avg_score %}
+                                    <small class="text-muted">
+                                        {{ avg_score.min | round_float(3) }} - {{ avg_score.max | round_float(3) }}
+                                    </small>
+                                    {% else %}
+                                    <span class="text-muted">N/A</span>
+                                    {% endif %}
+                                </td>
+                                <td class="text-center">
+                                    {% if manufactoria_all_pass %}
+                                    <span class="{% if manufactoria_all_pass.mean >= 0.8 %}score-excellent{% elif manufactoria_all_pass.mean >= 0.6 %}score-good{% elif manufactoria_all_pass.mean >= 0.4 %}score-fair{% elif manufactoria_all_pass.mean >= 0.2 %}score-poor{% else %}score-bad{% endif %}">
+                                        {{ manufactoria_all_pass.mean | round_float(3) }}
+                                    </span>
+                                    {% else %}
+                                    <span class="text-muted">N/A</span>
+                                    {% endif %}
+                                </td>
+                                <td class="text-center">
+                                    {% if manufactoria_pass_rate %}
+                                    <span class="{% if manufactoria_pass_rate.mean >= 0.8 %}score-excellent{% elif manufactoria_pass_rate.mean >= 0.6 %}score-good{% elif manufactoria_pass_rate.mean >= 0.4 %}score-fair{% elif manufactoria_pass_rate.mean >= 0.2 %}score-poor{% else %}score-bad{% endif %}">
+                                        {{ manufactoria_pass_rate.mean | round_float(3) }}
+                                    </span>
+                                    {% else %}
+                                    <span class="text-muted">N/A</span>
+                                    {% endif %}
+                                </td>
+                                <td class="text-center">
+                                    <a href="{{ url_for('dataset_detail', model_name=model_name, dataset_name=dataset.name) }}" 
+                                       class="btn btn-primary btn-sm">
+                                        <i class="fas fa-eye me-1"></i>View Details
+                                    </a>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% else %}
+                <div class="text-center py-5">
+                    <i class="fas fa-inbox fa-3x text-muted mb-3"></i>
+                    <h5 class="text-muted">No datasets found for this model</h5>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Performance Charts -->
+{% if datasets %}
+<div class="row mt-5">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-chart-bar me-2"></i>
+                    Average Score by Dataset
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="chart-container">
+                    <canvas id="avgScoreChart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-chart-line me-2"></i>
+                    Score Variability
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="chart-container">
+                    <canvas id="variabilityChart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row mt-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-cogs me-2"></i>
+                    Manufactoria Metrics Comparison
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="chart-container">
+                    <canvas id="manufactoriaChart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+{% if datasets %}
+<script>
+// Prepare data for charts
+const datasetNames = [
+    {% for dataset in datasets %}
+    "{{ dataset.name }}"{% if not loop.last %},{% endif %}
+    {% endfor %}
+];
+
+const avgScores = [
+    {% for dataset in datasets %}
+    {% set metrics = dataset.aggregated_metrics.metrics if dataset.aggregated_metrics else {} %}
+    {% set avg_score = metrics.get('avg_score', {}) %}
+    {{ avg_score.mean if avg_score else 0 }}{% if not loop.last %},{% endif %}
+    {% endfor %}
+];
+
+const scoreStds = [
+    {% for dataset in datasets %}
+    {% set metrics = dataset.aggregated_metrics.metrics if dataset.aggregated_metrics else {} %}
+    {% set avg_score = metrics.get('avg_score', {}) %}
+    {{ avg_score.std if avg_score else 0 }}{% if not loop.last %},{% endif %}
+    {% endfor %}
+];
+
+const manufactoriaAllPass = [
+    {% for dataset in datasets %}
+    {% set metrics = dataset.aggregated_metrics.metrics if dataset.aggregated_metrics else {} %}
+    {% set manufactoria_all_pass = metrics.get('manufactoria_all_pass', {}) %}
+    {{ manufactoria_all_pass.mean if manufactoria_all_pass else 0 }}{% if not loop.last %},{% endif %}
+    {% endfor %}
+];
+
+const manufactoriaPassRate = [
+    {% for dataset in datasets %}
+    {% set metrics = dataset.aggregated_metrics.metrics if dataset.aggregated_metrics else {} %}
+    {% set manufactoria_pass_rate = metrics.get('manufactoria_pass_rate', {}) %}
+    {{ manufactoria_pass_rate.mean if manufactoria_pass_rate else 0 }}{% if not loop.last %},{% endif %}
+    {% endfor %}
+];
+
+// Average Score Chart
+const avgScoreCtx = document.getElementById('avgScoreChart').getContext('2d');
+new Chart(avgScoreCtx, {
+    type: 'bar',
+    data: {
+        labels: datasetNames,
+        datasets: [{
+            label: 'Average Score',
+            data: avgScores,
+            backgroundColor: 'rgba(54, 162, 235, 0.8)',
+            borderColor: 'rgba(54, 162, 235, 1)',
+            borderWidth: 1
+        }]
+    },
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+            y: {
+                beginAtZero: true,
+                max: 1.0,
+                ticks: {
+                    callback: function(value) {
+                        return (value * 100).toFixed(0) + '%';
+                    }
+                }
+            }
+        }
+    }
+});
+
+// Variability Chart
+const variabilityCtx = document.getElementById('variabilityChart').getContext('2d');
+new Chart(variabilityCtx, {
+    type: 'bar',
+    data: {
+        labels: datasetNames,
+        datasets: [{
+            label: 'Score Standard Deviation',
+            data: scoreStds,
+            backgroundColor: 'rgba(255, 99, 132, 0.8)',
+            borderColor: 'rgba(255, 99, 132, 1)',
+            borderWidth: 1
+        }]
+    },
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+            y: {
+                beginAtZero: true
+            }
+        }
+    }
+});
+
+// Manufactoria Metrics Chart
+const manufactoriaCtx = document.getElementById('manufactoriaChart').getContext('2d');
+new Chart(manufactoriaCtx, {
+    type: 'bar',
+    data: {
+        labels: datasetNames,
+        datasets: [{
+            label: 'All Pass Rate',
+            data: manufactoriaAllPass,
+            backgroundColor: 'rgba(75, 192, 192, 0.8)',
+            borderColor: 'rgba(75, 192, 192, 1)',
+            borderWidth: 1
+        }, {
+            label: 'Pass Rate',
+            data: manufactoriaPassRate,
+            backgroundColor: 'rgba(153, 102, 255, 0.8)',
+            borderColor: 'rgba(153, 102, 255, 1)',
+            borderWidth: 1
+        }]
+    },
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+            y: {
+                beginAtZero: true,
+                max: 1.0,
+                ticks: {
+                    callback: function(value) {
+                        return (value * 100).toFixed(0) + '%';
+                    }
+                }
+            }
+        }
+    }
+});
+</script>
+{% endif %}
+{% endblock %}

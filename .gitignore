@@ -17,7 +17,6 @@ models
 wandb
 data/*
 # !data/processed
-output/
 configs/beaker_configs/auto_created
 
 # Byte-compiled / optimized / DLL files
