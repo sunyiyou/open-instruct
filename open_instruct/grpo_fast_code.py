@@ -1810,7 +1810,7 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
                 )
 
                 # get and log evaluation metrics
-                eval_scores, eval_reward_metrics = asyncio.run(
+                eval_scores, eval_reward_metrics, eval_additional_metrics = asyncio.run(
                     reward_fn(
                         eval_responses,
                         eval_decoded_responses,
@@ -1839,10 +1839,28 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
                         
                         # Add dataset-specific metrics
                         dataset_metrics = {
-                            f"eval/{dataset_display_name}/scores": np.mean(dataset_scores),
                             f"eval/{dataset_display_name}/sequence_lengths": np.mean(dataset_seq_lengths),
                             f"eval/{dataset_display_name}/sample_count": len(indices)
                         }
+                        
+                        # Add all_pass and pass_rate metrics if available from additional_metrics
+                        if eval_additional_metrics:
+                            dataset_all_pass = []
+                            dataset_pass_rate = []
+                            
+                            for i in indices:
+                                if i < len(eval_additional_metrics) and eval_additional_metrics[i]:
+                                    # Look for metrics with this dataset name
+                                    for key, value in eval_additional_metrics[i].items():
+                                        if key.endswith("_all_pass") and dataset_name.split('/')[-1] in key:
+                                            dataset_all_pass.append(value)
+                                        elif key.endswith("_pass_rate") and dataset_name.split('/')[-1] in key:
+                                            dataset_pass_rate.append(value)
+                            
+                            if dataset_all_pass:
+                                dataset_metrics[f"eval/{dataset_display_name}/all_pass"] = np.mean(dataset_all_pass)
+                            if dataset_pass_rate:
+                                dataset_metrics[f"eval/{dataset_display_name}/pass_rate"] = np.mean(dataset_pass_rate)
                         
                         # Add dataset metrics to overall metrics
                         eval_reward_metrics.update(dataset_metrics)
@@ -2086,6 +2104,6 @@ if __name__ == "__main__":
             if ds_scores:
                 metrics[f"val/{display_name}/scores"] = np.array(ds_scores).mean()
 
-        return scores, metrics
+        return scores, metrics, additional_metrics if args.apply_verifiable_reward else []
 
     main(args, tokenizer_config, model_config, reward_fn)
