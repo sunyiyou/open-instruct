@@ -36,21 +36,26 @@ class DataLoader:
                 datasets = DataLoader.get_datasets_for_model(model_name)
                 total_runs = sum(len(d["runs"]) for d in datasets)
                 
-                # Calculate average score across all datasets
+                # Calculate average score and sequence length across all datasets
                 avg_scores = []
+                avg_seq_lengths = []
                 for dataset in datasets:
                     if dataset["aggregated_metrics"]:
                         avg_score = dataset["aggregated_metrics"]["metrics"].get("avg_score", {}).get("mean", 0)
+                        avg_seq_length = dataset["aggregated_metrics"]["metrics"].get("avg_sequence_length", {}).get("mean", 0)
                         avg_scores.append(avg_score)
+                        avg_seq_lengths.append(avg_seq_length)
                 
                 overall_avg_score = np.mean(avg_scores) if avg_scores else 0
+                overall_avg_seq_length = np.mean(avg_seq_lengths) if avg_seq_lengths else 0
                 
                 models.append({
                     "name": model_name,
                     "dir_name": model_dir.name,
                     "num_datasets": len(datasets),
                     "total_runs": total_runs,
-                    "avg_score": overall_avg_score
+                    "avg_score": overall_avg_score,
+                    "avg_sequence_length": overall_avg_seq_length
                 })
         
         return sorted(models, key=lambda x: x["name"])
@@ -186,6 +191,8 @@ class DataLoader:
                 
             scores = [run["score"] for run in runs]
             pass_rates = [run["manufactoria_pass_rate"] for run in runs]
+            seq_lengths = [run["sequence_length"] for run in runs]
+            tool_runtimes = [run["tool_runtime"] for run in runs]
             sample_data.update({
                 "total_runs": len(runs),
                 "best_score": max(scores),
@@ -195,8 +202,12 @@ class DataLoader:
                 "score_std": np.std(scores) if len(scores) > 1 else 0,
                 "pass_rate_std": np.std(pass_rates) if len(pass_rates) > 1 else 0,
                 "success_rate": sum(1 for score in scores if score > 0) / len(scores),
-                "avg_sequence_length": np.mean([run["sequence_length"] for run in runs]),
+                "avg_sequence_length": np.mean(seq_lengths),
+                "min_sequence_length": min(seq_lengths),
+                "max_sequence_length": max(seq_lengths),
+                "seq_length_std": np.std(seq_lengths) if len(seq_lengths) > 1 else 0,
                 "total_tool_calls": sum(run["num_tool_calls"] for run in runs),
+                "avg_tool_runtime": np.mean(tool_runtimes),
                 "timeout_rate": sum(1 for run in runs if run["tool_timeout"]) / len(runs),
                 "error_rate": sum(1 for run in runs if run["tool_error"]) / len(runs),
             })
@@ -250,21 +261,28 @@ def model_detail(model_name: str):
     # Calculate model-level statistics
     total_runs = sum(d["num_runs"] for d in datasets)
     avg_scores = []
+    avg_seq_lengths = []
     
     for dataset in datasets:
         if dataset["aggregated_metrics"]:
             avg_score = dataset["aggregated_metrics"]["metrics"].get("avg_score", {}).get("mean", 0)
+            avg_seq_length = dataset["aggregated_metrics"]["metrics"].get("avg_sequence_length", {}).get("mean", 0)
             avg_scores.append(avg_score)
+            avg_seq_lengths.append(avg_seq_length)
     
     model_avg_score = np.mean(avg_scores) if avg_scores else 0
     model_score_std = np.std(avg_scores) if len(avg_scores) > 1 else 0
+    model_avg_seq_length = np.mean(avg_seq_lengths) if avg_seq_lengths else 0
+    model_seq_length_std = np.std(avg_seq_lengths) if len(avg_seq_lengths) > 1 else 0
     
     return render_template('model_detail.html',
                          model_name=model_name,
                          datasets=datasets,
                          total_runs=total_runs,
                          model_avg_score=model_avg_score,
-                         model_score_std=model_score_std)
+                         model_score_std=model_score_std,
+                         model_avg_seq_length=model_avg_seq_length,
+                         model_seq_length_std=model_seq_length_std)
 
 
 @app.route('/model/<model_name>/dataset/<dataset_name>')
