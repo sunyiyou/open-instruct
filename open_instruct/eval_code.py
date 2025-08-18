@@ -956,7 +956,7 @@ class CodeEvaluator:
         
         df = pd.DataFrame(df_data)
         csv_path = os.path.join(output_dir, f"run_{run_id}_detailed.csv")
-        df.to_csv(csv_path, index=False)
+        df.to_csv(csv_path, index=False, escapechar='\\', quoting=1)
         
         # Save a summary CSV with pass rates by dataset
         dataset_summary = []
@@ -995,7 +995,7 @@ class CodeEvaluator:
         summary_df = pd.concat([summary_df, pd.DataFrame([overall_summary])], ignore_index=True)
         
         summary_csv_path = os.path.join(output_dir, f"run_{run_id}_summary.csv")
-        summary_df.to_csv(summary_csv_path, index=False)
+        summary_df.to_csv(summary_csv_path, index=False, escapechar='\\', quoting=1)
         
         print(f"💾 Run {run_id} results saved to {output_dir}")
     
