@@ -66,7 +66,7 @@ class APIConfig:
 
     # Model names
     anthropic_model_name: str = "claude-3-5-sonnet-20241022"
-    openai_model_name: str = "gpt-4o"
+    openai_model_name: str = "o3-mini"
     deepseek_model_name: str = "deepseek-reasoner"
 
     # Anthropic specific settings
@@ -265,7 +265,7 @@ class APIClientManager:
                 {"role": "system", "content": "You are a helpful assistant."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=self.config.api_max_tokens,
+            max_completion_tokens=self.config.api_max_tokens,
             temperature=self.config.api_temperature,
         )
         text = resp.choices[0].message.content if resp.choices else None

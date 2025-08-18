@@ -1,0 +1,657 @@
+{% extends "base.html" %}
+
+{% block title %}Sample {{ sample_id }} - Sample Details{% endblock %}
+
+{% block breadcrumb %}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="{{ url_for('home') }}">Home</a></li>
+        <li class="breadcrumb-item"><a href="{{ url_for('model_detail', model_name=model_name) }}">{{ model_name }}</a></li>
+        <li class="breadcrumb-item"><a href="{{ url_for('dataset_detail', model_name=model_name, dataset_name=dataset_name) }}">{{ dataset_name }}</a></li>
+        <li class="breadcrumb-item active">Sample {{ sample_id }}</li>
+    </ol>
+</nav>
+{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-12">
+        <h1 class="display-5 mb-3">
+            <i class="fas fa-file-alt me-3"></i>
+            Sample {{ sample_id }} Analysis
+        </h1>
+        <p class="lead text-muted">
+            Detailed analysis across {{ total_runs }} runs for <strong>{{ model_name }}</strong> on <strong>{{ dataset_name }}</strong>
+        </p>
+    </div>
+</div>
+
+<!-- Sample Summary Statistics -->
+<div class="row mb-5">
+    <div class="col-md-3">
+        <div class="card card-metric text-center">
+            <div class="card-body">
+                <div class="metric-value">{{ sample_data.avg_score | round_float(3) }}</div>
+                <div class="metric-label">
+                    <i class="fas fa-trophy me-1"></i>Average Score
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card card-metric text-center">
+            <div class="card-body">
+                <div class="metric-value">{{ sample_data.best_score | round_float(3) }}</div>
+                <div class="metric-label">
+                    <i class="fas fa-arrow-up me-1"></i>Best Score
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card card-metric text-center">
+            <div class="card-body">
+                <div class="metric-value">{{ sample_data.success_rate | percentage }}</div>
+                <div class="metric-label">
+                    <i class="fas fa-check-circle me-1"></i>Success Rate
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card card-metric text-center">
+            <div class="card-body">
+                <div class="metric-value">{{ total_runs }}</div>
+                <div class="metric-label">
+                    <i class="fas fa-play me-1"></i>Total Runs
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Problem Description and Ground Truth -->
+<div class="row mb-4">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-question-circle me-2"></i>
+                    Problem Description
+                </h5>
+                {% if sample_data.original_data.get('criteria') %}
+                <button class="btn btn-sm btn-outline-info" type="button" onclick="toggleMarkdown('problem-description')">
+                    <i class="fas fa-code"></i> MD
+                </button>
+                {% endif %}
+            </div>
+            <div class="card-body">
+                {% if sample_data.original_data.get('criteria') %}
+                <div class="content-block" id="problem-description-content" data-raw-content="{{ sample_data.original_data.criteria | preserve_newlines | e }}">
+                    <pre class="code-block">{{ sample_data.original_data.criteria | preserve_newlines }}</pre>
+                </div>
+                {% else %}
+                <div class="text-muted">No problem description available</div>
+                {% endif %}
+                
+                {% if sample_data.original_data %}
+                <div class="mt-3">
+                    <h6>Metadata:</h6>
+                    <ul class="list-unstyled">
+                        {% if sample_data.original_data.get('id') %}
+                        <li><strong>ID:</strong> {{ sample_data.original_data.id }}</li>
+                        {% endif %}
+                        {% if sample_data.original_data.get('difficulty') %}
+                        <li><strong>Difficulty:</strong> <span class="badge bg-secondary">{{ sample_data.original_data.difficulty }}</span></li>
+                        {% endif %}
+                        {% if sample_data.original_data.get('problem_family') %}
+                        <li><strong>Problem Family:</strong> {{ sample_data.original_data.problem_family }}</li>
+                        {% endif %}
+                        {% if sample_data.original_data.get('name') %}
+                        <li><strong>Name:</strong> {{ sample_data.original_data.name }}</li>
+                        {% endif %}
+                    </ul>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-bullseye me-2"></i>
+                    Expected Output
+                </h5>
+                {% if sample_data.original_data.get('ground_truth') or (runs and runs[0].ground_truth) %}
+                <button class="btn btn-sm btn-outline-info" type="button" onclick="toggleMarkdown('expected-output')">
+                    <i class="fas fa-code"></i> MD
+                </button>
+                {% endif %}
+            </div>
+            <div class="card-body">
+                {% if sample_data.original_data.get('ground_truth') %}
+                <div class="content-block" id="expected-output-content" data-raw-content="{{ sample_data.original_data.ground_truth | preserve_newlines | e }}">
+                    <pre class="code-block">{{ sample_data.original_data.ground_truth | preserve_newlines }}</pre>
+                </div>
+                {% elif runs and runs[0].ground_truth %}
+                <div class="content-block" id="expected-output-content" data-raw-content="{{ runs[0].ground_truth | preserve_newlines | e }}">
+                    <pre class="code-block">{{ runs[0].ground_truth | preserve_newlines }}</pre>
+                </div>
+                {% else %}
+                <div class="text-muted">No ground truth available</div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Performance Analysis -->
+<div class="row mb-4">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-chart-pie me-2"></i>
+                    Performance Summary
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-6">
+                        <strong>Score Statistics:</strong>
+                        <ul class="list-unstyled mt-2">
+                            <li>Mean: {{ score_stats.mean | round_float(4) }}</li>
+                            <li>Std Dev: {{ score_stats.std | round_float(4) }}</li>
+                            <li>Range: {{ score_stats.min | round_float(3) }} - {{ score_stats.max | round_float(3) }}</li>
+                        </ul>
+                    </div>
+                    <div class="col-6">
+                        <strong>Execution Stats:</strong>
+                        <ul class="list-unstyled mt-2">
+                            <li>Avg Length: {{ sample_data.avg_sequence_length | round | int }} tokens</li>
+                            <li>Length Range: {{ sample_data.min_sequence_length | round | int }}-{{ sample_data.max_sequence_length | round | int }}</li>
+                            <li>Length Std Dev: {{ sample_data.seq_length_std | round | int }}</li>
+                            <li>Tool Calls: {{ sample_data.total_tool_calls }}</li>
+                            <li>Avg Tool Runtime: {{ sample_data.avg_tool_runtime | round_float(2) }}s</li>
+                            <li>Timeout Rate: {{ sample_data.timeout_rate | percentage }}</li>
+                            <li>Error Rate: {{ sample_data.error_rate | percentage }}</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-exclamation-triangle me-2"></i>
+                    Failure Analysis
+                </h5>
+            </div>
+            <div class="card-body">
+                {% for reason, count in failure_summary.items() %}
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <span class="{% if reason == 'Success' %}text-success{% else %}text-danger{% endif %}">
+                        {{ reason }}
+                    </span>
+                    <div>
+                        <span class="badge {% if reason == 'Success' %}bg-success{% else %}bg-danger{% endif %}">
+                            {{ count }}
+                        </span>
+                        <small class="text-muted ms-2">
+                            ({{ (count / total_runs) | percentage }})
+                        </small>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Run Results -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-list me-2"></i>
+                    Results Across All Runs
+                </h5>
+                <div class="btn-group" role="group">
+                    <input type="radio" class="btn-check" name="runFilterOptions" id="showAllRuns" autocomplete="off" checked>
+                    <label class="btn btn-outline-primary btn-sm" for="showAllRuns">All Runs</label>
+                    
+                    <input type="radio" class="btn-check" name="runFilterOptions" id="showSuccessRuns" autocomplete="off">
+                    <label class="btn btn-outline-success btn-sm" for="showSuccessRuns">Successes</label>
+                    
+                    <input type="radio" class="btn-check" name="runFilterOptions" id="showFailureRuns" autocomplete="off">
+                    <label class="btn btn-outline-danger btn-sm" for="showFailureRuns">Failures</label>
+                </div>
+            </div>
+            <div class="card-body">
+                <div id="runsContainer">
+                    {% for run in runs %}
+                    <div class="run-card card mb-3 {% if run.score > 0 %}success{% else %}failure{% endif %}" 
+                         data-success="{{ 'true' if run.score > 0 else 'false' }}">
+                        <div class="card-header">
+                            <div class="row align-items-center">
+                                <div class="col-md-6">
+                                    <h6 class="mb-0">
+                                        <i class="fas fa-play me-2"></i>
+                                        Run {{ run.run_id }}
+                                    </h6>
+                                </div>
+                                <div class="col-md-6 text-end">
+                                    <span class="badge {% if run.score > 0 %}bg-success{% else %}bg-danger{% endif %}">
+                                        Score: {{ run.score | round_float(3) }}
+                                    </span>
+                                    {% if run.finish_reason != 'stop' %}
+                                    <span class="badge bg-warning">{{ run.finish_reason }}</span>
+                                    {% endif %}
+                                    {% if run.tool_timeout %}
+                                    <span class="badge bg-danger">Timeout</span>
+                                    {% endif %}
+                                    {% if run.tool_error %}
+                                    <span class="badge bg-danger">Tool Error</span>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <div class="row">
+                                <!-- Prompt Section -->
+                                <div class="col-md-6">
+                                    <h6>
+                                        <i class="fas fa-question-circle me-1"></i>Prompt
+                                        <div class="btn-group ms-2" role="group">
+                                            <button class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#prompt-{{ run.run_id }}" aria-expanded="false">
+                                                <i class="fas fa-eye"></i> Toggle
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-info" type="button" onclick="toggleMarkdown('prompt-{{ run.run_id }}')">
+                                                <i class="fas fa-code"></i> MD
+                                            </button>
+                                        </div>
+                                    </h6>
+                                    <div class="collapse" id="prompt-{{ run.run_id }}">
+                                        <div class="content-block" id="prompt-{{ run.run_id }}-content" data-raw-content="{{ run.prompt | preserve_newlines | e }}">
+                                            <pre class="code-block">{{ run.prompt | preserve_newlines }}</pre>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <!-- Response Section -->
+                                <div class="col-md-6">
+                                    <h6>
+                                        <i class="fas fa-robot me-1"></i>Response
+                                        <div class="btn-group ms-2" role="group">
+                                            <button class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#response-{{ run.run_id }}" aria-expanded="false">
+                                                <i class="fas fa-eye"></i> Toggle
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-info" type="button" onclick="toggleMarkdown('response-{{ run.run_id }}')">
+                                                <i class="fas fa-code"></i> MD
+                                            </button>
+                                        </div>
+                                    </h6>
+                                    <div class="collapse" id="response-{{ run.run_id }}">
+                                        <div class="content-block" id="response-{{ run.run_id }}-content" data-raw-content="{{ run.response | preserve_newlines | e }}">
+                                            <pre class="code-block">{{ run.response | preserve_newlines }}</pre>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <!-- Tool Output Section -->
+                            {% if run.tool_output %}
+                            <div class="row mt-3">
+                                <div class="col-12">
+                                    <h6>
+                                        <i class="fas fa-terminal me-1"></i>Tool Output
+                                        <div class="btn-group ms-2" role="group">
+                                            <button class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#tool-output-{{ run.run_id }}" aria-expanded="false">
+                                                <i class="fas fa-eye"></i> Toggle
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-info" type="button" onclick="toggleMarkdown('tool-output-{{ run.run_id }}')">
+                                                <i class="fas fa-code"></i> MD
+                                            </button>
+                                        </div>
+                                    </h6>
+                                    <div class="collapse" id="tool-output-{{ run.run_id }}">
+                                        <div class="content-block" id="tool-output-{{ run.run_id }}-content" data-raw-content="{{ run.tool_output | preserve_newlines | e }}">
+                                            <pre class="code-block">{{ run.tool_output | preserve_newlines }}</pre>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            {% endif %}
+                            
+                            <!-- Metadata -->
+                            <div class="row mt-3">
+                                <div class="col-12">
+                                    <small class="text-muted">
+                                        <strong>Run Metadata:</strong>
+                                        Sequence Length: {{ run.sequence_length | format_large_number }}, 
+                                        Tool Calls: {{ run.num_tool_calls }},
+                                        Tool Runtime: {{ run.tool_runtime | round_float(2) }}s,
+                                        Tool Called: {{ 'Yes' if run.tool_called else 'No' }}
+                                        {% if run.failure_reason and run.failure_reason != 'none' %}
+                                        | Failure: {{ run.failure_reason }}
+                                        {% endif %}
+                                    </small>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+                
+                {% if runs|length == 0 %}
+                <div class="text-center py-5">
+                    <i class="fas fa-inbox fa-3x text-muted mb-3"></i>
+                    <h5 class="text-muted">No runs found for this sample</h5>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Performance Charts -->
+{% if runs|length > 1 %}
+<div class="row mt-5">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-chart-line me-2"></i>
+                    Score Progression
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="chart-container">
+                    <canvas id="scoreProgressionChart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-clock me-2"></i>
+                    Tool Performance & Sequence Length
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="chart-container">
+                    <canvas id="toolPerformanceChart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Markdown toggle functionality
+function toggleMarkdown(contentId) {
+    // Find the content container
+    let contentContainer = document.getElementById(contentId + '-content');
+    if (!contentContainer) {
+        contentContainer = document.getElementById(contentId);
+    }
+    if (!contentContainer) {
+        return;
+    }
+    
+    const rawContent = contentContainer.getAttribute('data-raw-content');
+    if (!rawContent) {
+        return;
+    }
+    
+    const currentContent = contentContainer.innerHTML;
+    
+    // Check if currently showing markdown (contains <div class="markdown-content">)
+    const isMarkdown = currentContent.includes('markdown-content');
+    
+    if (isMarkdown) {
+        // Switch back to raw/pre format
+        contentContainer.innerHTML = `<pre class="code-block">${escapeHtml(rawContent)}</pre>`;
+    } else {
+        // Switch to markdown rendering
+        try {
+            let markdownHtml;
+            
+            // Check if marked is available
+            if (typeof marked !== 'undefined') {
+                // Configure marked for safer rendering
+                marked.setOptions({
+                    breaks: true,
+                    gfm: true,
+                    sanitize: false,
+                    highlight: function(code, lang) {
+                        return code;
+                    }
+                });
+                markdownHtml = marked.parse(rawContent);
+            } else if (typeof window.simpleMarkdown !== 'undefined') {
+                markdownHtml = window.simpleMarkdown(rawContent);
+            } else {
+                // Just format with line breaks
+                markdownHtml = escapeHtml(rawContent).replace(/\n/g, '<br>');
+            }
+            
+            contentContainer.innerHTML = `<div class="markdown-content">${markdownHtml}</div>`;
+        } catch (error) {
+            // Fallback to escaped HTML display with line breaks
+            const formattedContent = escapeHtml(rawContent).replace(/\n/g, '<br>');
+            contentContainer.innerHTML = `<div class="markdown-content">${formattedContent}</div>`;
+        }
+    }
+}
+
+// Helper function to escape HTML
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+
+
+// Run filtering
+document.querySelectorAll('input[name="runFilterOptions"]').forEach(radio => {
+    radio.addEventListener('change', function() {
+        const runCards = document.querySelectorAll('.run-card');
+        
+        runCards.forEach(card => {
+            const isSuccess = card.dataset.success === 'true';
+            
+            if (this.id === 'showAllRuns') {
+                card.style.display = 'block';
+            } else if (this.id === 'showSuccessRuns' && isSuccess) {
+                card.style.display = 'block';
+            } else if (this.id === 'showFailureRuns' && !isSuccess) {
+                card.style.display = 'block';
+            } else {
+                card.style.display = 'none';
+            }
+        });
+    });
+});
+
+{% if runs|length > 1 %}
+// Prepare data for charts
+const runIds = [
+    {% for run in runs %}
+    {{ run.run_id }}{% if not loop.last %},{% endif %}
+    {% endfor %}
+];
+
+const scores = [
+    {% for run in runs %}
+    {{ run.score }}{% if not loop.last %},{% endif %}
+    {% endfor %}
+];
+
+const toolRuntimes = [
+    {% for run in runs %}
+    {{ run.tool_runtime }}{% if not loop.last %},{% endif %}
+    {% endfor %}
+];
+
+const toolCalls = [
+    {% for run in runs %}
+    {{ run.num_tool_calls }}{% if not loop.last %},{% endif %}
+    {% endfor %}
+];
+
+const sequenceLengths = [
+    {% for run in runs %}
+    {{ run.sequence_length }}{% if not loop.last %},{% endif %}
+    {% endfor %}
+];
+
+// Score Progression Chart
+const progressionCtx = document.getElementById('scoreProgressionChart').getContext('2d');
+new Chart(progressionCtx, {
+    type: 'line',
+    data: {
+        labels: runIds,
+        datasets: [{
+            label: 'Score',
+            data: scores,
+            borderColor: 'rgba(54, 162, 235, 1)',
+            backgroundColor: 'rgba(54, 162, 235, 0.2)',
+            borderWidth: 2,
+            fill: true,
+            tension: 0.1
+        }]
+    },
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+            y: {
+                beginAtZero: true,
+                max: 1.0,
+                ticks: {
+                    callback: function(value) {
+                        return (value * 100).toFixed(0) + '%';
+                    }
+                }
+            },
+            x: {
+                title: {
+                    display: true,
+                    text: 'Run ID'
+                }
+            }
+        },
+        plugins: {
+            tooltip: {
+                callbacks: {
+                    label: function(context) {
+                        return 'Score: ' + (context.parsed.y * 100).toFixed(1) + '%';
+                    }
+                }
+            }
+        }
+    }
+});
+
+// Tool Performance Chart
+const toolCtx = document.getElementById('toolPerformanceChart').getContext('2d');
+new Chart(toolCtx, {
+    type: 'bar',
+    data: {
+        labels: runIds,
+        datasets: [{
+            label: 'Tool Runtime (seconds)',
+            data: toolRuntimes,
+            backgroundColor: 'rgba(255, 99, 132, 0.8)',
+            borderColor: 'rgba(255, 99, 132, 1)',
+            borderWidth: 1,
+            yAxisID: 'y'
+        }, {
+            label: 'Tool Calls',
+            data: toolCalls,
+            backgroundColor: 'rgba(75, 192, 192, 0.8)',
+            borderColor: 'rgba(75, 192, 192, 1)',
+            borderWidth: 1,
+            yAxisID: 'y1'
+        }, {
+            label: 'Sequence Length',
+            data: sequenceLengths,
+            backgroundColor: 'rgba(255, 206, 86, 0.8)',
+            borderColor: 'rgba(255, 206, 86, 1)',
+            borderWidth: 1,
+            yAxisID: 'y2'
+        }]
+    },
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+            y: {
+                type: 'linear',
+                display: true,
+                position: 'left',
+                title: {
+                    display: true,
+                    text: 'Runtime (seconds)'
+                }
+            },
+            y1: {
+                type: 'linear',
+                display: true,
+                position: 'right',
+                title: {
+                    display: true,
+                    text: 'Number of Calls'
+                },
+                grid: {
+                    drawOnChartArea: false,
+                }
+            },
+            y2: {
+                type: 'linear',
+                display: false,
+                position: 'right',
+                title: {
+                    display: true,
+                    text: 'Sequence Length'
+                },
+                grid: {
+                    drawOnChartArea: false,
+                }
+            },
+            x: {
+                title: {
+                    display: true,
+                    text: 'Run ID'
+                }
+            }
+        },
+        plugins: {
+            tooltip: {
+                callbacks: {
+                    afterLabel: function(context) {
+                        if (context.datasetIndex === 2) {
+                            return 'tokens';
+                        }
+                        return '';
+                    }
+                }
+            }
+        }
+    }
+});
+{% endif %}
+</script>
+{% endblock %}

@@ -501,7 +501,12 @@ class CodeEvaluator:
             if ds_scores:
                 metrics[f"{display_name}/scores"] = np.array(ds_scores).mean()
 
-        return scores, metrics
+        # Return per-sample additional_metrics if available
+        per_sample_additional_metrics = None
+        if self.args.apply_verifiable_reward and 'additional_metrics' in locals():
+            per_sample_additional_metrics = additional_metrics
+        
+        return scores, metrics, per_sample_additional_metrics
     
 
     
@@ -593,6 +598,10 @@ class CodeEvaluator:
             print(f"📁 Folder: {folder_name}")
             print(f"📍 Output: {output_dir}")
             
+            # Create dataset-specific evaluation dataset and save original dataset info first
+            single_dataset_eval = await self.create_single_dataset_eval(dataset_config)
+            self.save_original_dataset_jsonl(single_dataset_eval, output_dir)
+            
             # Check for existing runs for this specific dataset
             existing_runs = self.check_existing_runs(output_dir)
             if existing_runs > 0:
@@ -616,7 +625,7 @@ class CodeEvaluator:
             
             # Run evaluation for this specific dataset
             dataset_results = await self.run_single_dataset_evaluation(
-                dataset_config, existing_runs, start_run_id, remaining_runs
+                dataset_config, existing_runs, start_run_id, remaining_runs, single_dataset_eval
             )
             all_dataset_results[dataset_name] = dataset_results
         
@@ -628,7 +637,8 @@ class CodeEvaluator:
         dataset_config: Dict, 
         existing_runs: int, 
         start_run_id: int, 
-        remaining_runs: int
+        remaining_runs: int,
+        single_dataset_eval = None
     ) -> Dict:
         """Run evaluation for a single dataset"""
         dataset_name = dataset_config["dataset_name"]
@@ -641,8 +651,9 @@ class CodeEvaluator:
             existing_results = self.load_existing_results(existing_runs, output_dir)
             all_results.extend(existing_results)
         
-        # Create dataset-specific evaluation dataset
-        single_dataset_eval = await self.create_single_dataset_eval(dataset_config)
+        # Use the pre-created dataset (or create it if not provided for backward compatibility)
+        if single_dataset_eval is None:
+            single_dataset_eval = await self.create_single_dataset_eval(dataset_config)
         
         # Run additional evaluations
         for i in range(remaining_runs):
@@ -733,7 +744,7 @@ class CodeEvaluator:
         
         # Compute rewards
         with Timer(f"Computing rewards for {dataset_name}"):
-            scores, metrics = await self.compute_rewards(
+            scores, metrics, per_sample_additional_metrics = await self.compute_rewards(
                 response_ids,
                 decoded_responses, 
                 eval_ground_truths,
@@ -768,6 +779,7 @@ class CodeEvaluator:
                 "sequence_lengths": sequence_lengths.tolist(),
                 "infos": infos,
                 "messages": eval_messages,
+                "additional_metrics": per_sample_additional_metrics,
             }
             results["detailed"] = detailed_results
             
@@ -777,6 +789,80 @@ class CodeEvaluator:
             
         return results
     
+    def save_original_dataset_jsonl(self, eval_dataset, output_dir: str):
+        """Save the original dataset information as JSONL file"""
+        os.makedirs(output_dir, exist_ok=True)
+        
+        jsonl_path = os.path.join(output_dir, "original_dataset.jsonl")
+        
+        # Check if JSONL file already exists to avoid overwriting
+        if os.path.exists(jsonl_path):
+            return
+            
+        print(f"💾 Saving original dataset information to {jsonl_path}")
+        
+        with open(jsonl_path, "w") as f:
+            for i in range(len(eval_dataset)):
+                # Extract original data for this sample
+                sample_data = {
+                    "index": f"{i}",
+                    "dataset_source": eval_dataset["__dataset_source__"][i],
+                }
+                
+                # Extract criteria from messages (the part after the task description)
+                if "messages" in eval_dataset.column_names:
+                    messages = eval_dataset["messages"][i]
+                    criteria = ""
+                    if messages and len(messages) > 0:
+                        # Look for the user message content
+                        for msg in messages:
+                            if msg.get("role") == "user" and "content" in msg:
+                                content = msg["content"]
+                                # Extract the part after the task description
+                                task_prefix = "Your task is to design a factory with code with following functionality:\n\n"
+                                if task_prefix in content:
+                                    criteria = content.split(task_prefix, 1)[1].strip()
+                                else:
+                                    # Fallback: use the full content if the prefix isn't found
+                                    criteria = content.strip()
+                                break
+                    sample_data["criteria"] = criteria
+                
+                # Add ground truth
+                if GROUND_TRUTHS_KEY in eval_dataset.column_names:
+                    sample_data["ground_truth"] = eval_dataset[GROUND_TRUTHS_KEY][i]
+                
+                # Add dataset source information
+                if DATASET_SOURCE_KEY in eval_dataset.column_names:
+                    sample_data["dataset"] = eval_dataset[DATASET_SOURCE_KEY][i]
+                
+                # Add any other original columns that might be useful
+                # We want to preserve original metadata like: dataset, difficulty, id, problem_family, name, etc.
+                excluded_columns = {
+                    "__dataset_source__", "messages", GROUND_TRUTHS_KEY, DATASET_SOURCE_KEY, 
+                    INPUT_IDS_PROMPT_KEY, "input_ids", "attention_mask", "labels",
+                    "input_ids_chosen", "input_ids_rejected", "labels_chosen", "labels_rejected"
+                }
+                
+                for col in eval_dataset.column_names:
+                    if col not in excluded_columns and col not in sample_data:
+                        # Keep original metadata columns like dataset, difficulty, id, problem_family, name, etc.
+                        try:
+                            value = eval_dataset[col][i]
+                            # Only include if it's a serializable type
+                            if isinstance(value, (str, int, float, bool, list, dict, type(None))):
+                                sample_data[col] = value
+                        except Exception as e:
+                            # Skip any columns that can't be serialized
+                            print(f"Warning: Skipping column '{col}' for sample {i}: {e}")
+                            pass
+                
+                # Write as JSONL (one JSON object per line)
+                json.dump(sample_data, f, ensure_ascii=False)
+                f.write("\n")
+        
+        print(f"✅ Saved {len(eval_dataset)} samples to {jsonl_path}")
+
     def save_single_run_results(self, run_result: Dict, output_dir: str):
         """Save results for a single evaluation run immediately"""
         if not self.args.save_results or "detailed" not in run_result:
@@ -834,11 +920,39 @@ class CodeEvaluator:
             "tool_called": tool_calleds,
         }
         
-        # Add metric columns that are available
-        available_metrics = ["manufactoria_all_pass", "manufactoria_pass_rate", "format_scores"]
-        for metric in available_metrics:
-            if metric in run_metrics:
-                df_data[metric] = [run_metrics[metric]] * len(detailed["responses"])
+        # Add per-sample additional metrics if available
+        if detailed.get("additional_metrics") is not None:
+            # Extract manufactoria metrics per sample
+            manufactoria_all_pass = []
+            manufactoria_pass_rate = []
+            
+            for i, sample_metrics in enumerate(detailed["additional_metrics"]):
+                if sample_metrics:
+                    # Extract manufactoria metrics (the keys are prefixed with dataset name)
+                    all_pass = None
+                    pass_rate = None
+                    
+                    for key, value in sample_metrics.items():
+                        if key.endswith("_all_pass"):
+                            all_pass = value
+                        elif key.endswith("_pass_rate"):
+                            pass_rate = value
+                    
+                    manufactoria_all_pass.append(all_pass)
+                    manufactoria_pass_rate.append(pass_rate)
+                else:
+                    manufactoria_all_pass.append(None)
+                    manufactoria_pass_rate.append(None)
+            
+            # Add the per-sample metrics to the DataFrame
+            df_data["manufactoria_all_pass"] = manufactoria_all_pass
+            df_data["manufactoria_pass_rate"] = manufactoria_pass_rate
+        else:
+            # Fallback to global metrics if per-sample metrics are not available
+            available_metrics = ["manufactoria_all_pass", "manufactoria_pass_rate"]
+            for metric in available_metrics:
+                if metric in run_metrics:
+                    df_data[metric] = [run_metrics[metric]] * len(detailed["responses"])
         
         df = pd.DataFrame(df_data)
         csv_path = os.path.join(output_dir, f"run_{run_id}_detailed.csv")
@@ -857,12 +971,9 @@ class CodeEvaluator:
                 "tool_timeout_rate": dataset_df["tool_timeout"].mean(),
                 "tool_error_rate": dataset_df["tool_error"].mean(),
                 "avg_sequence_length": dataset_df["sequence_length"].mean(),
+                "manufactoria_all_pass": dataset_df["manufactoria_all_pass"].mean(),
+                "manufactoria_pass_rate": dataset_df["manufactoria_pass_rate"].mean(),
             }
-            
-            # Add available metrics to the summary
-            for metric in available_metrics:
-                if metric in df.columns:
-                    summary_row[metric] = dataset_df[metric].mean()
             
             dataset_summary.append(summary_row)
         
@@ -877,12 +988,9 @@ class CodeEvaluator:
             "tool_timeout_rate": df["tool_timeout"].mean(),
             "tool_error_rate": df["tool_error"].mean(),
             "avg_sequence_length": df["sequence_length"].mean(),
+            "manufactoria_all_pass": df["manufactoria_all_pass"].mean(),
+            "manufactoria_pass_rate": df["manufactoria_pass_rate"].mean(),
         }
-        
-        # Add available metrics to overall summary
-        for metric in available_metrics:
-            if metric in df.columns:
-                overall_summary[metric] = df[metric].mean()
         
         summary_df = pd.concat([summary_df, pd.DataFrame([overall_summary])], ignore_index=True)
         

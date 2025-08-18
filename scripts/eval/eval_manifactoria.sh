@@ -4,13 +4,29 @@ set -x
 
 # Define datasets as a bash array (not Python syntax!)
 DATASETS=(
-    "manufactoria/contains_ood_mix_test" "2"
-    "manufactoria/contains_mix_test" "2"
+    #  "manufactoria/ends_with_two_color_medium" "2"
+    # "manufactoria/basic_mix_test" "2"
+    "manufactoria/ends_with_two_color_medium" "50"
+    "manufactoria/basic_mix_test" "27"
+    "manufactoria/contains_mix_test" "50"
+    "manufactoria/numerical_comparison_test" "50"
+    "manufactoria/regex_pattern_four_color_easy" "50"
+    "manufactoria/regex_pattern_four_color_medium" "50"
+    "manufactoria/regex_pattern_four_color_hard" "50"
+    "manufactoria/regex_same_num_four_color_hard" "50"
+    "manufactoria/prepend_sequence_two_color_easy" "30"
+    "manufactoria/prepend_sequence_two_color_medium" "50"
+    "manufactoria/prepend_sequence_two_color_hard" "50"
+    "manufactoria/numerical_operations_two_color_easy" "7"
+    "manufactoria/numerical_operations_two_color_hard" "14"
+    "manufactoria/numerical_operations_two_color_medium" "21"
+    "manufactoria/numerical_max_min_two_color_medium" "50"
+    "manufactoria/manufactoria" "32"
 )
 
 export MANUFACTORIA_API_URL=http://localhost:8071
 model_name_or_path=Qwen/Qwen3-4B-Thinking-2507
-exp_name=Qwen3-4B-Thinking-2507-manufactoria-all
+exp_name=anthropic-manufactoria-all
 
 # Set API key (make sure this is set in your environment)
 # export ANTHROPIC_API_KEY="your-api-key-here"
@@ -46,7 +62,7 @@ args=(
 --chat_template_name qwen3
 
 # Evaluation configuration
---num_runs 4
+--num_runs 16
 --seed 1
 
 # Generation parameters (for VLLM mode, ignored in API mode)

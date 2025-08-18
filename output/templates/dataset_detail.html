@@ -1,0 +1,548 @@
+{% extends "base.html" %}
+
+{% block title %}{{ dataset_name }} - Dataset Details{% endblock %}
+
+{% block breadcrumb %}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="{{ url_for('home') }}">Home</a></li>
+        <li class="breadcrumb-item"><a href="{{ url_for('model_detail', model_name=model_name) }}">{{ model_name }}</a></li>
+        <li class="breadcrumb-item active">{{ dataset_name }}</li>
+    </ol>
+</nav>
+{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-12">
+        <h1 class="display-5 mb-3">
+            <i class="fas fa-database me-3"></i>
+            {{ dataset_name }}
+        </h1>
+        <p class="lead text-muted">
+            Performance analysis for <strong>{{ model_name }}</strong> on this dataset
+        </p>
+    </div>
+</div>
+
+<!-- Dataset Summary Statistics -->
+{% set metrics = dataset_info.aggregated_metrics.metrics if dataset_info.aggregated_metrics else {} %}
+{% set avg_score = metrics.get('avg_score', {}) %}
+{% set avg_sequence_length = metrics.get('avg_sequence_length', {}) %}
+{% set manufactoria_all_pass = metrics.get('manufactoria_all_pass', {}) %}
+{% set manufactoria_pass_rate = metrics.get('manufactoria_pass_rate', {}) %}
+{% set stop_rate = dataset_info.aggregated_metrics.stop_rate if dataset_info.aggregated_metrics else {} %}
+
+<div class="row mb-5">
+    <div class="col-md-2">
+        <div class="card card-metric text-center">
+            <div class="card-body">
+                <div class="metric-value">{{ dataset_info.num_runs }}</div>
+                <div class="metric-label">
+                    <i class="fas fa-play me-1"></i>Total Runs
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-2">
+        <div class="card card-metric text-center">
+            <div class="card-body">
+                <div class="metric-value">
+                    {% if avg_score %}
+                    {{ avg_score.mean | round_float(3) }}
+                    {% else %}
+                    N/A
+                    {% endif %}
+                </div>
+                <div class="metric-label">
+                    <i class="fas fa-trophy me-1"></i>Avg Score
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-2">
+        <div class="card card-metric text-center">
+            <div class="card-body">
+                <div class="metric-value">
+                    {% if avg_sequence_length %}
+                    {{ avg_sequence_length.mean | round_float(0) }}
+                    {% else %}
+                    N/A
+                    {% endif %}
+                </div>
+                <div class="metric-label">
+                    <i class="fas fa-ruler me-1"></i>Avg Seq Length
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-2">
+        <div class="card card-metric text-center">
+            <div class="card-body">
+                <div class="metric-value">
+                    {% if manufactoria_all_pass %}
+                    {{ manufactoria_all_pass.mean | round_float(3) }}
+                    {% else %}
+                    N/A
+                    {% endif %}
+                </div>
+                <div class="metric-label">
+                    <i class="fas fa-cogs me-1"></i>All Pass Rate
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-2">
+        <div class="card card-metric text-center">
+            <div class="card-body">
+                <div class="metric-value">
+                    {% if manufactoria_pass_rate %}
+                    {{ manufactoria_pass_rate.mean | round_float(3) }}
+                    {% else %}
+                    N/A
+                    {% endif %}
+                </div>
+                <div class="metric-label">
+                    <i class="fas fa-check-circle me-1"></i>Pass Rate
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-2">
+        <div class="card card-metric text-center">
+            <div class="card-body">
+                <div class="metric-value">
+                    {% if stop_rate %}
+                    {{ stop_rate.mean | percentage(1) }}
+                    {% else %}
+                    N/A
+                    {% endif %}
+                </div>
+                <div class="metric-label">
+                    <i class="fas fa-stop-circle me-1"></i>Stop Rate
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Performance Metrics -->
+{% if avg_score %}
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-chart-line me-2"></i>
+                    Performance Metrics Summary
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-4">
+                        <h6>Average Score Distribution</h6>
+                        <ul class="list-unstyled">
+                            <li><strong>Mean:</strong> {{ avg_score.mean | round_float(4) }} ({{ avg_score.mean | percentage }})</li>
+                            <li><strong>Standard Deviation:</strong> {{ avg_score.std | round_float(4) }}</li>
+                            <li><strong>Minimum:</strong> {{ avg_score.min | round_float(4) }} ({{ avg_score.min | percentage }})</li>
+                            <li><strong>Maximum:</strong> {{ avg_score.max | round_float(4) }} ({{ avg_score.max | percentage }})</li>
+                        </ul>
+                    </div>
+                    <div class="col-md-4">
+                        {% if avg_sequence_length %}
+                        <h6>Sequence Length Distribution</h6>
+                        <ul class="list-unstyled">
+                            <li><strong>Mean:</strong> {{ avg_sequence_length.mean | round_float(0) }} tokens</li>
+                            <li><strong>Standard Deviation:</strong> {{ avg_sequence_length.std | round_float(0) }}</li>
+                            <li><strong>Minimum:</strong> {{ avg_sequence_length.min | round_float(0) }}</li>
+                            <li><strong>Maximum:</strong> {{ avg_sequence_length.max | round_float(0) }}</li>
+                        </ul>
+                        {% endif %}
+                    </div>
+                    <div class="col-md-4">
+                        {% if manufactoria_all_pass and manufactoria_pass_rate %}
+                        <h6>Manufactoria Metrics</h6>
+                        <ul class="list-unstyled">
+                            <li><strong>All Pass Mean:</strong> {{ manufactoria_all_pass.mean | round_float(4) }} ({{ manufactoria_all_pass.mean | percentage }})</li>
+                            <li><strong>Pass Rate Mean:</strong> {{ manufactoria_pass_rate.mean | round_float(4) }} ({{ manufactoria_pass_rate.mean | percentage }})</li>
+                            <li><strong>All Pass Std:</strong> {{ manufactoria_all_pass.std | round_float(4) }}</li>
+                            <li><strong>Pass Rate Std:</strong> {{ manufactoria_pass_rate.std | round_float(4) }}</li>
+                        </ul>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<!-- Sample Browser Table -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-th-list me-2"></i>
+                    Sample Browser
+                </h5>
+                <div class="d-flex gap-2">
+                    <span class="badge bg-info">{{ samples | length }} samples</span>
+                    <span class="badge bg-secondary">{{ dataset_info.num_runs }} runs</span>
+                </div>
+            </div>
+            <div class="card-body">
+                {% if samples %}
+                <div class="mb-3">
+                    <div class="input-group">
+                        <span class="input-group-text">
+                            <i class="fas fa-search"></i>
+                        </span>
+                        <input type="text" class="form-control" id="sampleSearch" placeholder="Search samples by problem description, ID, or performance...">
+                    </div>
+                </div>
+                
+                <div class="table-responsive">
+                    <table class="table table-hover" id="samplesTable">
+                        <thead class="table-dark">
+                            <tr>
+                                <th><i class="fas fa-hashtag me-1"></i>Sample ID</th>
+                                <th><i class="fas fa-tag me-1"></i>Name</th>
+                                <th><i class="fas fa-align-left me-1"></i>Problem Description</th>
+                                <th class="text-center"><i class="fas fa-check-double me-1"></i>Avg Pass Rate</th>
+                                <th class="text-center"><i class="fas fa-chart-line me-1"></i>Best/Worst</th>
+                                <th class="text-center"><i class="fas fa-ruler me-1"></i>Avg Seq Length</th>
+                                <th class="text-center"><i class="fas fa-percent me-1"></i>Success Rate</th>
+                                <th class="text-center"><i class="fas fa-play me-1"></i>Runs</th>
+                                <th class="text-center"><i class="fas fa-external-link-alt me-1"></i>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for sample in samples %}
+                            <tr class="sample-row">
+                                <td>
+                                    <span class="badge bg-primary">{{ sample.sample_id }}</span>
+                                    {% if sample.original_data.get('id') %}
+                                    <br><small class="text-muted">{{ sample.original_data.id }}</small>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    {% if sample.original_data.get('name') %}
+                                    <div class="text-truncate" style="max-width: 200px;" title="{{ sample.original_data.name }}">
+                                        {{ sample.original_data.name }}
+                                    </div>
+                                    {% else %}
+                                    <span class="text-muted">-</span>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    <div class="problem-description">
+                                        {% if sample.original_data.get('criteria') %}
+                                        <div class="text-truncate" style="max-width: 300px;" title="{{ sample.original_data.criteria }}">
+                                            {{ sample.original_data.criteria[:100] }}{% if sample.original_data.criteria|length > 100 %}...{% endif %}
+                                        </div>
+                                        {% else %}
+                                        <span class="text-muted">No description available</span>
+                                        {% endif %}
+                                        
+                                        {% if sample.original_data.get('difficulty') %}
+                                        <small class="d-block mt-1">
+                                            <span class="badge bg-secondary">{{ sample.original_data.difficulty }}</span>
+                                        </small>
+                                        {% endif %}
+                                    </div>
+                                </td>
+                                <td class="text-center">
+                                    <span class="{% if sample.avg_pass_rate >= 0.8 %}score-excellent{% elif sample.avg_pass_rate >= 0.6 %}score-good{% elif sample.avg_pass_rate >= 0.4 %}score-fair{% elif sample.avg_pass_rate >= 0.2 %}score-poor{% else %}score-bad{% endif %}">
+                                        {{ sample.avg_pass_rate | round_float(3) }}
+                                    </span>
+                                    {% if sample.pass_rate_std > 0 %}
+                                    <br><small class="text-muted">±{{ sample.pass_rate_std | round_float(3) }}</small>
+                                    {% endif %}
+                                </td>
+                                <td class="text-center">
+                                    <span class="{% if sample.best_score >= 0.8 %}score-excellent{% elif sample.best_score >= 0.6 %}score-good{% elif sample.best_score >= 0.4 %}score-fair{% elif sample.best_score >= 0.2 %}score-poor{% else %}score-bad{% endif %}">
+                                        {{ sample.best_score | round_float(3) }}
+                                    </span>
+                                    /
+                                    <span class="{% if sample.worst_score >= 0.8 %}score-excellent{% elif sample.worst_score >= 0.6 %}score-good{% elif sample.worst_score >= 0.4 %}score-fair{% elif sample.worst_score >= 0.2 %}score-poor{% else %}score-bad{% endif %}">
+                                        {{ sample.worst_score | round_float(3) }}
+                                    </span>
+                                </td>
+                                <td class="text-center">
+                                    <span class="badge bg-info">
+                                        {{ sample.avg_sequence_length | round_float(0) }}
+                                    </span>
+                                    {% if sample.seq_length_std > 0 %}
+                                    <br><small class="text-muted">±{{ sample.seq_length_std | round_float(0) }}</small>
+                                    {% endif %}
+                                    <br><small class="text-muted">{{ sample.min_sequence_length | round_float(0) }}-{{ sample.max_sequence_length | round_float(0) }}</small>
+                                </td>
+                                <td class="text-center">
+                                    <span class="{% if sample.success_rate >= 0.8 %}score-excellent{% elif sample.success_rate >= 0.6 %}score-good{% elif sample.success_rate >= 0.4 %}score-fair{% elif sample.success_rate >= 0.2 %}score-poor{% else %}score-bad{% endif %}">
+                                        {{ sample.success_rate | percentage }}
+                                    </span>
+                                    <br><small class="text-muted">{{ (sample.success_rate * sample.total_runs) | round | int }}/{{ sample.total_runs }}</small>
+                                </td>
+                                <td class="text-center">
+                                    <span class="badge bg-secondary">{{ sample.total_runs }}</span>
+                                    {% if sample.timeout_rate > 0 %}
+                                    <br><small class="text-warning">{{ sample.timeout_rate | percentage }} timeout</small>
+                                    {% endif %}
+                                    {% if sample.error_rate > 0 %}
+                                    <br><small class="text-danger">{{ sample.error_rate | percentage }} error</small>
+                                    {% endif %}
+                                </td>
+                                <td class="text-center">
+                                    <a href="{{ url_for('sample_detail', model_name=model_name, dataset_name=dataset_name, sample_id=sample.sample_id) }}" 
+                                       class="btn btn-primary btn-sm">
+                                        <i class="fas fa-eye me-1"></i>View Sample
+                                    </a>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% else %}
+                <div class="text-center py-5">
+                    <i class="fas fa-inbox fa-3x text-muted mb-3"></i>
+                    <h5 class="text-muted">No samples found for this dataset</h5>
+                    <p class="text-muted">Make sure evaluation results are properly formatted and located in the correct directory.</p>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Performance Charts -->
+{% if dataset_info.runs %}
+<div class="row mt-5">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-chart-line me-2"></i>
+                    Score Progression
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="chart-container">
+                    <canvas id="scoreProgressionChart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-chart-bar me-2"></i>
+                    Manufactoria Metrics
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="chart-container">
+                    <canvas id="manufactoriaChart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Sample search functionality
+document.getElementById('sampleSearch').addEventListener('input', function() {
+    const filter = this.value.toLowerCase();
+    const rows = document.querySelectorAll('#samplesTable tbody .sample-row');
+    
+    rows.forEach(row => {
+        const sampleId = row.querySelector('td:first-child').textContent.toLowerCase();
+        const name = row.querySelector('td:nth-child(2)').textContent.toLowerCase();
+        const description = row.querySelector('.problem-description').textContent.toLowerCase();
+        const passRate = row.querySelector('td:nth-child(4)').textContent.toLowerCase();
+        
+        const searchText = sampleId + ' ' + name + ' ' + description + ' ' + passRate;
+        
+        if (searchText.includes(filter)) {
+            row.style.display = '';
+        } else {
+            row.style.display = 'none';
+        }
+    });
+    
+    // Update visible count
+    const visibleRows = document.querySelectorAll('#samplesTable tbody .sample-row[style=""]').length;
+    const totalRows = rows.length;
+    console.log(`Showing ${visibleRows} of ${totalRows} samples`);
+});
+
+// Enhanced tooltips for truncated descriptions
+document.querySelectorAll('.text-truncate').forEach(element => {
+    if (element.scrollWidth > element.clientWidth) {
+        element.style.cursor = 'help';
+        element.addEventListener('mouseenter', function() {
+            const tooltip = document.createElement('div');
+            tooltip.className = 'position-absolute bg-dark text-white p-2 rounded shadow';
+            tooltip.style.zIndex = '1000';
+            tooltip.style.maxWidth = '400px';
+            tooltip.style.fontSize = '0.875rem';
+            tooltip.textContent = this.getAttribute('title');
+            
+            document.body.appendChild(tooltip);
+            
+            const rect = this.getBoundingClientRect();
+            tooltip.style.left = rect.left + 'px';
+            tooltip.style.top = (rect.bottom + 5) + 'px';
+            
+            this.tooltipElement = tooltip;
+        });
+        
+        element.addEventListener('mouseleave', function() {
+            if (this.tooltipElement) {
+                document.body.removeChild(this.tooltipElement);
+                this.tooltipElement = null;
+            }
+        });
+    }
+});
+
+{% if samples and dataset_info.runs %}
+// Sample performance distribution chart
+const samplePassRates = [
+    {% for sample in samples %}
+    {{ sample.avg_pass_rate }}{% if not loop.last %},{% endif %}
+    {% endfor %}
+];
+
+const sampleSuccessRates = [
+    {% for sample in samples %}
+    {{ sample.success_rate }}{% if not loop.last %},{% endif %}
+    {% endfor %}
+];
+
+// Only create charts if we have chart containers
+if (document.getElementById('scoreProgressionChart')) {
+    // Score distribution chart
+    const progressionCtx = document.getElementById('scoreProgressionChart').getContext('2d');
+    
+    // Create bins for pass rate distribution
+    const bins = [0, 0.2, 0.4, 0.6, 0.8, 1.0];
+    const binCounts = new Array(bins.length - 1).fill(0);
+    const binLabels = ['0-0.2', '0.2-0.4', '0.4-0.6', '0.6-0.8', '0.8-1.0'];
+    
+    samplePassRates.forEach(passRate => {
+        for (let i = 0; i < bins.length - 1; i++) {
+            if (passRate >= bins[i] && passRate < bins[i + 1]) {
+                binCounts[i]++;
+                break;
+            } else if (passRate === 1.0 && i === bins.length - 2) {
+                binCounts[i]++;
+                break;
+            }
+        }
+    });
+    
+    new Chart(progressionCtx, {
+        type: 'bar',
+        data: {
+            labels: binLabels,
+            datasets: [{
+                label: 'Sample Count',
+                data: binCounts,
+                backgroundColor: [
+                    'rgba(220, 53, 69, 0.8)',   // 0-0.2 (red)
+                    'rgba(253, 126, 20, 0.8)',  // 0.2-0.4 (orange)
+                    'rgba(255, 193, 7, 0.8)',   // 0.4-0.6 (yellow)
+                    'rgba(32, 201, 151, 0.8)',  // 0.6-0.8 (teal)
+                    'rgba(40, 167, 69, 0.8)'    // 0.8-1.0 (green)
+                ],
+                borderWidth: 1
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                title: {
+                    display: true,
+                    text: 'Sample Pass Rate Distribution'
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    title: {
+                        display: true,
+                        text: 'Number of Samples'
+                    }
+                },
+                x: {
+                    title: {
+                        display: true,
+                        text: 'Pass Rate Range'
+                    }
+                }
+            }
+        }
+    });
+}
+
+if (document.getElementById('manufactoriaChart')) {
+    // Success rate vs Score scatter plot
+    const manufactoriaCtx = document.getElementById('manufactoriaChart').getContext('2d');
+    
+    const scatterData = samplePassRates.map((passRate, index) => ({
+        x: passRate,
+        y: sampleSuccessRates[index]
+    }));
+    
+    new Chart(manufactoriaCtx, {
+        type: 'scatter',
+        data: {
+            datasets: [{
+                label: 'Samples',
+                data: scatterData,
+                backgroundColor: 'rgba(54, 162, 235, 0.6)',
+                borderColor: 'rgba(54, 162, 235, 1)',
+                borderWidth: 1
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                title: {
+                    display: true,
+                    text: 'Average Pass Rate vs Success Rate'
+                }
+            },
+            scales: {
+                x: {
+                    title: {
+                        display: true,
+                        text: 'Average Pass Rate'
+                    },
+                    min: 0,
+                    max: 1
+                },
+                y: {
+                    title: {
+                        display: true,
+                        text: 'Success Rate'
+                    },
+                    min: 0,
+                    max: 1
+                }
+            }
+        }
+    });
+}
+{% endif %}
+</script>
+{% endblock %}
