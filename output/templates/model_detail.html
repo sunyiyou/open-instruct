@@ -26,7 +26,7 @@
 
 <!-- Model Summary Statistics -->
 <div class="row mb-5">
-    <div class="col-md-3">
+    <div class="col-md-2">
         <div class="card card-metric text-center">
             <div class="card-body">
                 <div class="metric-value">{{ datasets | length }}</div>
@@ -36,7 +36,7 @@
             </div>
         </div>
     </div>
-    <div class="col-md-3">
+    <div class="col-md-2">
         <div class="card card-metric text-center">
             <div class="card-body">
                 <div class="metric-value">{{ total_runs }}</div>
@@ -46,7 +46,7 @@
             </div>
         </div>
     </div>
-    <div class="col-md-3">
+    <div class="col-md-2">
         <div class="card card-metric text-center">
             <div class="card-body">
                 <div class="metric-value">{{ model_avg_score | round_float(3) }}</div>
@@ -56,12 +56,32 @@
             </div>
         </div>
     </div>
-    <div class="col-md-3">
+    <div class="col-md-2">
         <div class="card card-metric text-center">
             <div class="card-body">
                 <div class="metric-value">{{ model_score_std | round_float(3) }}</div>
                 <div class="metric-label">
                     <i class="fas fa-chart-line me-1"></i>Score Std Dev
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-2">
+        <div class="card card-metric text-center">
+            <div class="card-body">
+                <div class="metric-value">{{ model_avg_seq_length | round_float(0) }}</div>
+                <div class="metric-label">
+                    <i class="fas fa-ruler me-1"></i>Avg Seq Length
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-2">
+        <div class="card card-metric text-center">
+            <div class="card-body">
+                <div class="metric-value">{{ model_seq_length_std | round_float(0) }}</div>
+                <div class="metric-label">
+                    <i class="fas fa-expand-arrows-alt me-1"></i>Seq Length Std
                 </div>
             </div>
         </div>
@@ -88,6 +108,7 @@
                                 <th class="text-center"><i class="fas fa-play me-1"></i>Runs</th>
                                 <th class="text-center"><i class="fas fa-trophy me-1"></i>Avg Score</th>
                                 <th class="text-center"><i class="fas fa-chart-line me-1"></i>Score Range</th>
+                                <th class="text-center"><i class="fas fa-ruler me-1"></i>Avg Seq Length</th>
                                 <th class="text-center"><i class="fas fa-cogs me-1"></i>Manufactoria All Pass</th>
                                 <th class="text-center"><i class="fas fa-check-circle me-1"></i>Manufactoria Pass Rate</th>
                                 <th class="text-center"><i class="fas fa-external-link-alt me-1"></i>Actions</th>
@@ -97,6 +118,7 @@
                             {% for dataset in datasets %}
                             {% set metrics = dataset.aggregated_metrics.metrics if dataset.aggregated_metrics else {} %}
                             {% set avg_score = metrics.get('avg_score', {}) %}
+                            {% set avg_sequence_length = metrics.get('avg_sequence_length', {}) %}
                             {% set manufactoria_all_pass = metrics.get('manufactoria_all_pass', {}) %}
                             {% set manufactoria_pass_rate = metrics.get('manufactoria_pass_rate', {}) %}
                             <tr>
@@ -127,6 +149,17 @@
                                     <small class="text-muted">
                                         {{ avg_score.min | round_float(3) }} - {{ avg_score.max | round_float(3) }}
                                     </small>
+                                    {% else %}
+                                    <span class="text-muted">N/A</span>
+                                    {% endif %}
+                                </td>
+                                <td class="text-center">
+                                    {% if avg_sequence_length %}
+                                    <span class="badge bg-info">
+                                        {{ avg_sequence_length.mean | round_float(0) }}
+                                    </span>
+                                    <br>
+                                    <small class="text-muted">±{{ avg_sequence_length.std | round_float(0) }}</small>
                                     {% else %}
                                     <span class="text-muted">N/A</span>
                                     {% endif %}
@@ -174,7 +207,7 @@
 <!-- Performance Charts -->
 {% if datasets %}
 <div class="row mt-5">
-    <div class="col-md-6">
+    <div class="col-md-4">
         <div class="card">
             <div class="card-header">
                 <h5 class="card-title mb-0">
@@ -189,7 +222,7 @@
             </div>
         </div>
     </div>
-    <div class="col-md-6">
+    <div class="col-md-4">
         <div class="card">
             <div class="card-header">
                 <h5 class="card-title mb-0">
@@ -200,6 +233,21 @@
             <div class="card-body">
                 <div class="chart-container">
                     <canvas id="variabilityChart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-ruler me-2"></i>
+                    Sequence Length by Dataset
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="chart-container">
+                    <canvas id="sequenceLengthChart"></canvas>
                 </div>
             </div>
         </div>
@@ -269,6 +317,14 @@ const manufactoriaPassRate = [
     {% endfor %}
 ];
 
+const avgSequenceLengths = [
+    {% for dataset in datasets %}
+    {% set metrics = dataset.aggregated_metrics.metrics if dataset.aggregated_metrics else {} %}
+    {% set avg_sequence_length = metrics.get('avg_sequence_length', {}) %}
+    {{ avg_sequence_length.mean if avg_sequence_length else 0 }}{% if not loop.last %},{% endif %}
+    {% endfor %}
+];
+
 // Average Score Chart
 const avgScoreCtx = document.getElementById('avgScoreChart').getContext('2d');
 new Chart(avgScoreCtx, {
@@ -320,6 +376,35 @@ new Chart(variabilityCtx, {
         scales: {
             y: {
                 beginAtZero: true
+            }
+        }
+    }
+});
+
+// Sequence Length Chart
+const seqLengthCtx = document.getElementById('sequenceLengthChart').getContext('2d');
+new Chart(seqLengthCtx, {
+    type: 'bar',
+    data: {
+        labels: datasetNames,
+        datasets: [{
+            label: 'Avg Sequence Length',
+            data: avgSequenceLengths,
+            backgroundColor: 'rgba(255, 206, 86, 0.8)',
+            borderColor: 'rgba(255, 206, 86, 1)',
+            borderWidth: 1
+        }]
+    },
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+            y: {
+                beginAtZero: true,
+                title: {
+                    display: true,
+                    text: 'Sequence Length (tokens)'
+                }
             }
         }
     }

@@ -28,12 +28,13 @@
 <!-- Dataset Summary Statistics -->
 {% set metrics = dataset_info.aggregated_metrics.metrics if dataset_info.aggregated_metrics else {} %}
 {% set avg_score = metrics.get('avg_score', {}) %}
+{% set avg_sequence_length = metrics.get('avg_sequence_length', {}) %}
 {% set manufactoria_all_pass = metrics.get('manufactoria_all_pass', {}) %}
 {% set manufactoria_pass_rate = metrics.get('manufactoria_pass_rate', {}) %}
 {% set stop_rate = dataset_info.aggregated_metrics.stop_rate if dataset_info.aggregated_metrics else {} %}
 
 <div class="row mb-5">
-    <div class="col-md-3">
+    <div class="col-md-2">
         <div class="card card-metric text-center">
             <div class="card-body">
                 <div class="metric-value">{{ dataset_info.num_runs }}</div>
@@ -43,7 +44,7 @@
             </div>
         </div>
     </div>
-    <div class="col-md-3">
+    <div class="col-md-2">
         <div class="card card-metric text-center">
             <div class="card-body">
                 <div class="metric-value">
@@ -59,7 +60,23 @@
             </div>
         </div>
     </div>
-    <div class="col-md-3">
+    <div class="col-md-2">
+        <div class="card card-metric text-center">
+            <div class="card-body">
+                <div class="metric-value">
+                    {% if avg_sequence_length %}
+                    {{ avg_sequence_length.mean | round_float(0) }}
+                    {% else %}
+                    N/A
+                    {% endif %}
+                </div>
+                <div class="metric-label">
+                    <i class="fas fa-ruler me-1"></i>Avg Seq Length
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-2">
         <div class="card card-metric text-center">
             <div class="card-body">
                 <div class="metric-value">
@@ -75,7 +92,23 @@
             </div>
         </div>
     </div>
-    <div class="col-md-3">
+    <div class="col-md-2">
+        <div class="card card-metric text-center">
+            <div class="card-body">
+                <div class="metric-value">
+                    {% if manufactoria_pass_rate %}
+                    {{ manufactoria_pass_rate.mean | round_float(3) }}
+                    {% else %}
+                    N/A
+                    {% endif %}
+                </div>
+                <div class="metric-label">
+                    <i class="fas fa-check-circle me-1"></i>Pass Rate
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-2">
         <div class="card card-metric text-center">
             <div class="card-body">
                 <div class="metric-value">
@@ -106,7 +139,7 @@
             </div>
             <div class="card-body">
                 <div class="row">
-                    <div class="col-md-6">
+                    <div class="col-md-4">
                         <h6>Average Score Distribution</h6>
                         <ul class="list-unstyled">
                             <li><strong>Mean:</strong> {{ avg_score.mean | round_float(4) }} ({{ avg_score.mean | percentage }})</li>
@@ -115,7 +148,18 @@
                             <li><strong>Maximum:</strong> {{ avg_score.max | round_float(4) }} ({{ avg_score.max | percentage }})</li>
                         </ul>
                     </div>
-                    <div class="col-md-6">
+                    <div class="col-md-4">
+                        {% if avg_sequence_length %}
+                        <h6>Sequence Length Distribution</h6>
+                        <ul class="list-unstyled">
+                            <li><strong>Mean:</strong> {{ avg_sequence_length.mean | round_float(0) }} tokens</li>
+                            <li><strong>Standard Deviation:</strong> {{ avg_sequence_length.std | round_float(0) }}</li>
+                            <li><strong>Minimum:</strong> {{ avg_sequence_length.min | round_float(0) }}</li>
+                            <li><strong>Maximum:</strong> {{ avg_sequence_length.max | round_float(0) }}</li>
+                        </ul>
+                        {% endif %}
+                    </div>
+                    <div class="col-md-4">
                         {% if manufactoria_all_pass and manufactoria_pass_rate %}
                         <h6>Manufactoria Metrics</h6>
                         <ul class="list-unstyled">
@@ -167,6 +211,7 @@
                                 <th><i class="fas fa-align-left me-1"></i>Problem Description</th>
                                 <th class="text-center"><i class="fas fa-check-double me-1"></i>Avg Pass Rate</th>
                                 <th class="text-center"><i class="fas fa-chart-line me-1"></i>Best/Worst</th>
+                                <th class="text-center"><i class="fas fa-ruler me-1"></i>Avg Seq Length</th>
                                 <th class="text-center"><i class="fas fa-percent me-1"></i>Success Rate</th>
                                 <th class="text-center"><i class="fas fa-play me-1"></i>Runs</th>
                                 <th class="text-center"><i class="fas fa-external-link-alt me-1"></i>Actions</th>
@@ -223,6 +268,15 @@
                                     <span class="{% if sample.worst_score >= 0.8 %}score-excellent{% elif sample.worst_score >= 0.6 %}score-good{% elif sample.worst_score >= 0.4 %}score-fair{% elif sample.worst_score >= 0.2 %}score-poor{% else %}score-bad{% endif %}">
                                         {{ sample.worst_score | round_float(3) }}
                                     </span>
+                                </td>
+                                <td class="text-center">
+                                    <span class="badge bg-info">
+                                        {{ sample.avg_sequence_length | round_float(0) }}
+                                    </span>
+                                    {% if sample.seq_length_std > 0 %}
+                                    <br><small class="text-muted">±{{ sample.seq_length_std | round_float(0) }}</small>
+                                    {% endif %}
+                                    <br><small class="text-muted">{{ sample.min_sequence_length | round_float(0) }}-{{ sample.max_sequence_length | round_float(0) }}</small>
                                 </td>
                                 <td class="text-center">
                                     <span class="{% if sample.success_rate >= 0.8 %}score-excellent{% elif sample.success_rate >= 0.6 %}score-good{% elif sample.success_rate >= 0.4 %}score-fair{% elif sample.success_rate >= 0.2 %}score-poor{% else %}score-bad{% endif %}">

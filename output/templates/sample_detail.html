@@ -169,8 +169,11 @@
                     <div class="col-6">
                         <strong>Execution Stats:</strong>
                         <ul class="list-unstyled mt-2">
-                            <li>Avg Length: {{ sample_data.avg_sequence_length | round | int }}</li>
+                            <li>Avg Length: {{ sample_data.avg_sequence_length | round | int }} tokens</li>
+                            <li>Length Range: {{ sample_data.min_sequence_length | round | int }}-{{ sample_data.max_sequence_length | round | int }}</li>
+                            <li>Length Std Dev: {{ sample_data.seq_length_std | round | int }}</li>
                             <li>Tool Calls: {{ sample_data.total_tool_calls }}</li>
+                            <li>Avg Tool Runtime: {{ sample_data.avg_tool_runtime | round_float(2) }}s</li>
                             <li>Timeout Rate: {{ sample_data.timeout_rate | percentage }}</li>
                             <li>Error Rate: {{ sample_data.error_rate | percentage }}</li>
                         </ul>
@@ -378,7 +381,7 @@
             <div class="card-header">
                 <h5 class="card-title mb-0">
                     <i class="fas fa-clock me-2"></i>
-                    Tool Performance
+                    Tool Performance & Sequence Length
                 </h5>
             </div>
             <div class="card-body">
@@ -508,6 +511,12 @@ const toolCalls = [
     {% endfor %}
 ];
 
+const sequenceLengths = [
+    {% for run in runs %}
+    {{ run.sequence_length }}{% if not loop.last %},{% endif %}
+    {% endfor %}
+];
+
 // Score Progression Chart
 const progressionCtx = document.getElementById('scoreProgressionChart').getContext('2d');
 new Chart(progressionCtx, {
@@ -576,6 +585,13 @@ new Chart(toolCtx, {
             borderColor: 'rgba(75, 192, 192, 1)',
             borderWidth: 1,
             yAxisID: 'y1'
+        }, {
+            label: 'Sequence Length',
+            data: sequenceLengths,
+            backgroundColor: 'rgba(255, 206, 86, 0.8)',
+            borderColor: 'rgba(255, 206, 86, 1)',
+            borderWidth: 1,
+            yAxisID: 'y2'
         }]
     },
     options: {
@@ -603,10 +619,34 @@ new Chart(toolCtx, {
                     drawOnChartArea: false,
                 }
             },
+            y2: {
+                type: 'linear',
+                display: false,
+                position: 'right',
+                title: {
+                    display: true,
+                    text: 'Sequence Length'
+                },
+                grid: {
+                    drawOnChartArea: false,
+                }
+            },
             x: {
                 title: {
                     display: true,
                     text: 'Run ID'
+                }
+            }
+        },
+        plugins: {
+            tooltip: {
+                callbacks: {
+                    afterLabel: function(context) {
+                        if (context.datasetIndex === 2) {
+                            return 'tokens';
+                        }
+                        return '';
+                    }
                 }
             }
         }

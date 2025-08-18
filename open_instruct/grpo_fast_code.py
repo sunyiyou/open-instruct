@@ -760,6 +760,24 @@ class PolicyTrainerRayProcess(RayProcess):
         to_device_inplace(collated_advantages, self.device)
         to_device_inplace(collated_response_masks, self.device)
         accumulation_steps = len(collated_query_responses) // (num_mini_batches)
+        
+        # Handle case where batch is too small for the number of mini-batches
+        if accumulation_steps == 0:
+            print(f"Warning: Batch size ({len(collated_query_responses)}) is smaller than num_mini_batches ({num_mini_batches}). Skipping training step to avoid division by zero.")
+            # Return empty metrics matching the expected structure
+            return {
+                "objective/kl_avg": 0.0,
+                "objective/kl2_avg": 0.0,
+                "objective/kl3_avg": 0.0,
+                "objective/kl4_avg": 0.0,
+                "loss/policy_avg": 0.0,
+                "loss/kl_avg": 0.0,
+                "loss/total_avg": 0.0,
+                "policy/clipfrac_avg": 0.0,
+                "val/ratio": 1.0,
+                "val/ratio_var": 0.0,
+                "lr": self.scheduler.get_last_lr()[0],
+            }
 
         # Calculate the logprob of the reference policy
         collated_ref_logprobs = []
@@ -1194,13 +1212,36 @@ def data_preparation_thread(
             if np.all(scores == 0) or not np.any(non_zero_std_mask):
                 print("Warning: All scores are zero or all std values are zero. Keeping only a few random samples.")
                 # Just keep a few random samples instead of the whole batch
-                num_samples_to_keep = min(args.per_device_train_batch_size * 2, len(scores))
-                non_zero_gradient_index = np.random.choice(len(scores), size=num_samples_to_keep, replace=False)
+                # Ensure we keep at least num_mini_batches samples per device to avoid division by zero
+                min_samples_needed = args.num_mini_batches * args.world_size
+                num_samples_to_keep = max(min_samples_needed, min(args.per_device_train_batch_size * 2, len(scores)))
+                if num_samples_to_keep > len(scores):
+                    # If we don't have enough samples, take all of them
+                    non_zero_gradient_index = np.arange(len(scores))
+                    num_samples_to_keep = len(scores)
+                else:
+                    non_zero_gradient_index = np.random.choice(len(scores), size=num_samples_to_keep, replace=False)
                 real_batch_size_ratio = num_samples_to_keep / len(scores)
             else:
                 real_batch_size_ratio = non_zero_std_mask.sum() * args.num_samples_per_prompt_rollout / len(scores)
                 expanded_mask = np.repeat(non_zero_std_mask, args.num_samples_per_prompt_rollout)
                 non_zero_gradient_index = np.where(expanded_mask)[0]
+                
+                # Additional safety check: ensure we have at least num_mini_batches samples per device
+                min_samples_needed = args.num_mini_batches * args.world_size
+                if len(non_zero_gradient_index) < min_samples_needed:
+                    print(f"Warning: After filtering, only {len(non_zero_gradient_index)} samples remain, but need at least {min_samples_needed}. Adding random samples.")
+                    # Get additional random samples to meet minimum requirement
+                    additional_needed = min_samples_needed - len(non_zero_gradient_index)
+                    all_indices = set(range(len(scores)))
+                    remaining_indices = list(all_indices - set(non_zero_gradient_index))
+                    if len(remaining_indices) >= additional_needed:
+                        additional_indices = np.random.choice(remaining_indices, size=additional_needed, replace=False)
+                        non_zero_gradient_index = np.concatenate([non_zero_gradient_index, additional_indices])
+                    else:
+                        # If we still don't have enough, take all available
+                        non_zero_gradient_index = np.arange(len(scores))
+                    real_batch_size_ratio = len(non_zero_gradient_index) / len(scores)
             advantages = advantages[non_zero_gradient_index]
             scores = scores[non_zero_gradient_index]
             responses = [responses[i] for i in non_zero_gradient_index]
@@ -1816,7 +1857,7 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
                         eval_responses,
                         eval_decoded_responses,
                         eval_ground_truths,
-                        eval_original_sources,
+                        eval_dataset_names,
                         eval_finish_reasons,
                         eval_infos,
                     )
