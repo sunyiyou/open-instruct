@@ -119,7 +119,7 @@ def init_process_group(
 @ray.remote
 class LLMRayActor:
 
-    def __init__(self, *args, bundle_indices: list = None, tool_use: bool = False, **kwargs):
+    def __init__(self, *args, bundle_indices: list = None, tool_use: bool = False, feedback_mode: bool = False, feedback_config: dict = None, **kwargs):
         noset_visible_devices = kwargs.pop("noset_visible_devices")
         if kwargs.get("distributed_executor_backend") == "ray":
             # a hack to make the script work.
@@ -139,7 +139,13 @@ class LLMRayActor:
             os.environ["VLLM_RAY_BUNDLE_INDICES"] = ",".join(map(str, bundle_indices))
             print(f"creating LLM with bundle_indices={bundle_indices}")
 
-        if tool_use:
+        if feedback_mode:
+            from open_instruct.tool_utils.manufactoria_feedback_vllm import ManufactoriaFeedbackLLM, ManufactoriaFeedbackConfig
+            
+            # Create feedback config from provided dict
+            config = ManufactoriaFeedbackConfig(**feedback_config) if feedback_config else ManufactoriaFeedbackConfig()
+            self.llm = ManufactoriaFeedbackLLM(config=config, *args, **kwargs)
+        elif tool_use:
             from open_instruct.tool_utils.tool_vllm import ToolUseLLM
 
             self.llm = ToolUseLLM(*args, **kwargs)
@@ -173,6 +179,16 @@ class LLMRayActor:
 
     def wake_up(self):
         self.llm.wake_up()
+    
+    def set_request_metadata(self, request_id: str, test_cases, dataset: str):
+        """Set metadata for feedback-based generation (if supported)."""
+        if hasattr(self.llm, 'set_request_metadata'):
+            return self.llm.set_request_metadata(request_id, test_cases, dataset)
+    
+    def set_batch_metadata(self, prompt_idx: int, test_cases, dataset: str, n_samples: int):
+        """Set batch metadata for feedback-based generation (if supported).""" 
+        if hasattr(self.llm, 'set_batch_metadata'):
+            return self.llm.set_batch_metadata(prompt_idx, test_cases, dataset, n_samples)
 
 
 def create_vllm_engines(
@@ -190,6 +206,7 @@ def create_vllm_engines(
     vllm_enable_sleep=False,
     tools: Optional[List[Any]] = None,
     max_tool_calls: List[int] = [5],
+    feedback_config: Optional[dict] = None,
 ):
     import vllm
 
@@ -235,7 +252,13 @@ def create_vllm_engines(
 
         additional_kwargs = {}
         tool_use = False
-        if tools is not None and len(tools) > 0:
+        feedback_mode = False
+        
+        if feedback_config is not None:
+            feedback_mode = True
+            additional_kwargs["feedback_mode"] = True
+            additional_kwargs["feedback_config"] = feedback_config
+        elif tools is not None and len(tools) > 0:
             tool_use = True
             additional_kwargs["tools"] = tools
             additional_kwargs["max_tool_calls"] = max_tool_calls_dict

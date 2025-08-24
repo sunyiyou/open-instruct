@@ -242,10 +242,11 @@ class Args:
     """
     ref_policy_update_freq: Optional[int] = None
     """How many training steps to take before updating the reference policy."""
-    advantage_normalization_type: Literal["standard", "centered"] = "standard"
-    """The type of advantage normalization to use. Standard normalization is the default: it subtracts the mean and
-    divides by the standard deviation. Centered normalization is the same but subtracts the mean only (e.g., used in
-    DR.GRPO https://arxiv.org/pdf/2503.20783)."""
+    advantage_normalization_type: Literal["group", "batch", "centered"] = "group"
+    """The type of advantage normalization to use:
+    - 'group': Group-level normalization - computes mean/std per prompt group of K samples (GRPO default)
+    - 'batch': Batch-level normalization - computes mean/std over all N*K samples in the batch
+    - 'centered': Centered normalization - only subtracts mean (no std division), used in DR.GRPO"""
     mask_truncated_completions: bool = False
     """Whether to mask out truncated completions. Also called overlong filtering, from DAPO (https://arxiv.org/abs/2503.14476)."""
 
@@ -385,6 +386,22 @@ class Args:
 
     # code-tool specific settings
     code_tool_api_endpoint: Optional[str] = None
+
+    # Feedback-based generation settings  
+    enable_feedback_generation: bool = False
+    """Whether to enable feedback-based generation (e.g., for Manufactoria DSL evaluation)"""
+    feedback_api_url: str = "http://localhost:1235"
+    """API URL for feedback generation (e.g., Manufactoria test endpoint)"""
+    feedback_max_iterations: int = 2
+    """Maximum number of feedback iterations per generation"""
+    feedback_datasets: List[str] = field(default_factory=lambda: ["manufactoria"])
+    """List of dataset names that should use feedback generation"""
+    feedback_timeout_seconds: float = 5.0
+    """Timeout for feedback API calls"""
+    feedback_format: Literal["detailed", "minimal"] = "detailed"
+    """Format for feedback messages"""
+    feedback_on_pass: bool = True
+    """Whether to provide feedback when all tests pass"""
 
     def __post_init__(self):
         assert self.num_samples_per_prompt_rollout > 0, "Number of samples per prompt must be greater than 0!"
@@ -1068,6 +1085,7 @@ def vllm_generate_thread(
     eval_freq: int,
     resume_training_step: int = 1,
     tool_use: bool = False,
+    feedback_enabled: bool = False,
 ):
     def generate_with_engines(prompts: List[List[int]], sampling_params: SamplingParams):
         # Split queries between engines
@@ -1100,8 +1118,18 @@ def vllm_generate_thread(
                 tool_outputs.extend([out.tool_output for output in outputs for out in output.outputs])
                 tool_runtimes.extend([out.tool_runtime for output in outputs for out in output.outputs])
                 tool_calleds.extend([out.tool_called for output in outputs for out in output.outputs])
-        # if not using the tool, mask is all 1s
-        if not tool_use:
+            elif feedback_enabled:
+                # For feedback mode, get masks and feedback iterations from outputs
+                masks.extend([getattr(out, 'mask', [1] * len(out.token_ids)) for output in outputs for out in output.outputs])
+                # For compatibility with tool_use format, set feedback-specific values
+                num_calls.extend([getattr(out, 'feedback_iterations', 0) for output in outputs for out in output.outputs])
+                timeouts.extend([0] * sum(len(output.outputs) for output in outputs))  # No timeout concept in feedback
+                tool_errors.extend([""] * sum(len(output.outputs) for output in outputs))  # No tool errors in feedback
+                tool_outputs.extend([""] * sum(len(output.outputs) for output in outputs))  # No tool outputs in feedback
+                tool_runtimes.extend([0] * sum(len(output.outputs) for output in outputs))  # No runtimes tracked currently
+                tool_calleds.extend([getattr(out, 'feedback_iterations', 0) > 0 for output in outputs for out in output.outputs])
+        # if not using tools or feedback, mask is all 1s
+        if not tool_use and not feedback_enabled:
             masks = [[1] * len(response_ids[i]) for i in range(len(response_ids))]
             num_calls = [0] * len(response_ids)
             timeouts = [0] * len(response_ids)
@@ -1120,7 +1148,35 @@ def vllm_generate_thread(
         items = param_prompt_Q.get()
         if items is None:
             break
-        _, g_queries_list = items
+        feedback_metadata, g_queries_list = items
+
+        # Set up feedback metadata if feedback is enabled
+        if feedback_enabled and feedback_metadata is not None:
+            ground_truths, datasets = feedback_metadata
+            
+            # Split the metadata to match how prompts are distributed across engines
+            # This mirrors the exact same logic used in generate_with_engines
+            queries_per_engine = (len(g_queries_list) + len(vllm_engines) - 1) // len(vllm_engines)
+            
+            for engine_idx, engine in enumerate(vllm_engines):
+                start_idx = engine_idx * queries_per_engine
+                end_idx = min(start_idx + queries_per_engine, len(g_queries_list))
+                
+                # Get the metadata slice that corresponds to this engine's prompts
+                engine_ground_truths = ground_truths[start_idx:end_idx]
+                engine_datasets = datasets[start_idx:end_idx]
+                
+                # Set metadata for each prompt that this engine will process
+                for local_prompt_idx in range(len(engine_ground_truths)):
+                    ground_truth = engine_ground_truths[local_prompt_idx]
+                    dataset = engine_datasets[local_prompt_idx]
+                    
+                    # For Manufactoria, the ground truth should contain test cases
+                    if isinstance(ground_truth, dict) and "test_cases" in ground_truth:
+                        test_cases = ground_truth["test_cases"]
+                        ray.get(engine.set_batch_metadata.remote(
+                            local_prompt_idx, test_cases, dataset, generation_config.n
+                        ))
 
         with Timer("🔥 Generation time"):
             response_ids, finish_reasons, masks, info = generate_with_engines(g_queries_list, generation_config)
@@ -1185,13 +1241,25 @@ def data_preparation_thread(
             )
             scores = np.array(scores)
             scores_per_prompt = scores.reshape(-1, args.num_samples_per_prompt_rollout)
-            mean_grouped_rewards = scores_per_prompt.mean(axis=-1)
-            mean_grouped_rewards = np.repeat(mean_grouped_rewards, args.num_samples_per_prompt_rollout, axis=0)
-            std_grouped_rewards = scores_per_prompt.std(axis=-1)
-            std_grouped_rewards = np.repeat(std_grouped_rewards, args.num_samples_per_prompt_rollout, axis=0)
-            if args.advantage_normalization_type == "standard":
+            
+            if args.advantage_normalization_type == "group":
+                # Group-level normalization: A_k^group = (r_k - mean({r_j}_{j=1}^K)) / std({r_j}_{j=1}^K)
+                # Compute mean and std per prompt group (K samples per group)
+                mean_grouped_rewards = scores_per_prompt.mean(axis=-1)
+                mean_grouped_rewards = np.repeat(mean_grouped_rewards, args.num_samples_per_prompt_rollout, axis=0)
+                std_grouped_rewards = scores_per_prompt.std(axis=-1)
+                std_grouped_rewards = np.repeat(std_grouped_rewards, args.num_samples_per_prompt_rollout, axis=0)
                 advantages = (scores - mean_grouped_rewards) / (std_grouped_rewards + 1e-8)
+            elif args.advantage_normalization_type == "batch":
+                # Batch-level normalization: A_i^batch = (r_i - mean({r_j}_{j=1}^{N*K})) / std({r_j}_{j=1}^{N*K})
+                # Compute mean and std over all samples in the batch
+                mean_batch_rewards = scores.mean()
+                std_batch_rewards = scores.std()
+                advantages = (scores - mean_batch_rewards) / (std_batch_rewards + 1e-8)
             elif args.advantage_normalization_type == "centered":
+                # Centered normalization: only subtract mean, no std division (used in DR.GRPO)
+                mean_grouped_rewards = scores_per_prompt.mean(axis=-1)
+                mean_grouped_rewards = np.repeat(mean_grouped_rewards, args.num_samples_per_prompt_rollout, axis=0)
                 advantages = scores - mean_grouped_rewards
             else:
                 raise ValueError(f"Invalid advantage normalization type: {args.advantage_normalization_type}")
@@ -1575,6 +1643,19 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
             else:
                 raise ValueError(f"Unknown tool: {tool}")
 
+    # Prepare feedback config if feedback is enabled
+    feedback_config = None
+    if args.enable_feedback_generation:
+        feedback_config = {
+            "api_url": args.feedback_api_url,
+            "enable_feedback": True,
+            "max_iterations": args.feedback_max_iterations,
+            "feedback_datasets": args.feedback_datasets,
+            "timeout_seconds": args.feedback_timeout_seconds,
+            "feedback_format": args.feedback_format,
+            "feedback_on_pass": args.feedback_on_pass,
+        }
+
     vllm_engines = create_vllm_engines(
         args.vllm_num_engines,
         args.vllm_tensor_parallel_size,
@@ -1589,6 +1670,7 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
         pg=pg if args.single_gpu_mode else None,
         tools=tool_objects,
         max_tool_calls=args.max_tool_calls,
+        feedback_config=feedback_config,
     )
     resume_training_step = ray.get(inits)[0] + 1
     episode = (resume_training_step - 1) * args.num_unique_prompts_rollout * args.num_samples_per_prompt_rollout
@@ -1684,6 +1766,7 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
             args.eval_freq,
             resume_training_step,
             args.tool_use,
+            args.enable_feedback_generation,
         ),
     )
     thread.start()
@@ -1710,7 +1793,9 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
     ground_truths_next = data_next[GROUND_TRUTHS_KEY]
     datasets_next = data_next[DATASET_SOURCE_KEY]
     queries_prompt_Q.put((queries_next, ground_truths_next, datasets_next))
-    param_prompt_Q.put((None, queries_next))
+    # Pass feedback metadata if feedback is enabled
+    feedback_metadata = (ground_truths_next, datasets_next) if args.enable_feedback_generation else None
+    param_prompt_Q.put((feedback_metadata, queries_next))
 
     num_total_tokens = 0
     start_time = time.time()
@@ -1732,7 +1817,9 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
                     with Timer("[Main Thread] 🔄 Loading weights using shared memory"):
                         ray.get([m.broadcast_to_vllm.remote() for m in policy_group.models])
                 queries_prompt_Q.put((queries_next, ground_truths_next, datasets_next))
-                param_prompt_Q.put((None, queries_next))
+                # Pass feedback metadata if feedback is enabled
+                feedback_metadata = (ground_truths_next, datasets_next) if args.enable_feedback_generation else None
+                param_prompt_Q.put((feedback_metadata, queries_next))
             else:
                 if training_step != 1:
                     # NOTE: important: the indent here is different for sync mode
@@ -1744,7 +1831,9 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
                     with Timer("🔄 Loading weights using shared memory"):
                         ray.get([m.broadcast_to_vllm.remote() for m in policy_group.models])
                     queries_prompt_Q.put((queries_next, ground_truths_next, datasets_next))
-                    param_prompt_Q.put((None, queries_next))
+                    # Pass feedback metadata if feedback is enabled
+                    feedback_metadata = (ground_truths_next, datasets_next) if args.enable_feedback_generation else None
+                    param_prompt_Q.put((feedback_metadata, queries_next))
 
             # ------------------------------------------------------------------------------------------------
             # Get the packed sequences with advantages from the packing thread
