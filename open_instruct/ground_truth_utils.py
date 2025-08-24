@@ -769,8 +769,20 @@ class CodeVerifier(VerifierFunction):
                 )
             else:
                 return asyncio.run(self.async_call(tokenized_prediction, prediction, label, query))
-        except RuntimeError:
-            return asyncio.run(self.async_call(tokenized_prediction, prediction, label, query))
+        except RuntimeError as e:
+            # Check if this is due to interpreter shutdown
+            if "cannot schedule new futures after interpreter shutdown" in str(e):
+                logger.warning("Skipping Manufactoria verification due to interpreter shutdown")
+                return VerificationResult(score=0.0, reasoning="Verification skipped due to shutdown")
+            # For other RuntimeErrors, try asyncio.run as before
+            try:
+                return asyncio.run(self.async_call(tokenized_prediction, prediction, label, query))
+            except Exception as nested_e:
+                logger.warning(f"Error verifying Manufactoria sample during shutdown: {nested_e}")
+                return VerificationResult(score=0.0, reasoning=f"Verification failed: {nested_e}")
+        except Exception as e:
+            logger.warning(f"Error verifying Manufactoria sample: {e}")
+            return VerificationResult(score=0.0, reasoning=f"Verification failed: {e}")
 
     @classmethod
     def get_config_class(cls) -> type:
