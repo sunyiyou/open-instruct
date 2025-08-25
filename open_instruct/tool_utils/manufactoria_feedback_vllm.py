@@ -134,10 +134,20 @@ class ManufactoriaFeedbackLLM(LLM):
         """
         self.current_batch_id = batch_id
         
-        # Trigger cleanup if needed
+        # Trigger cleanup if needed (only on training steps, not evaluation steps)
         if batch_id.startswith("step_"):
             try:
                 current_step = int(batch_id.split("_")[1])
+                if current_step % self.cleanup_frequency == 0:
+                    self._cleanup_old_metadata(current_step)
+            except (ValueError, IndexError):
+                # If batch_id doesn't follow expected format, skip cleanup
+                pass
+        elif batch_id.startswith("eval_step_"):
+            # For evaluation batches, we could optionally trigger cleanup based on eval step
+            # but typically we only want to clean up based on training progress
+            try:
+                current_step = int(batch_id.split("_")[2])
                 if current_step % self.cleanup_frequency == 0:
                     self._cleanup_old_metadata(current_step)
             except (ValueError, IndexError):
@@ -147,6 +157,7 @@ class ManufactoriaFeedbackLLM(LLM):
     def _cleanup_old_metadata(self, current_step: int):
         """
         Clean up metadata from old batches to prevent memory leaks.
+        Handles both training batch IDs (step_X) and evaluation batch IDs (eval_step_X).
         
         Args:
             current_step: Current training step number
@@ -154,19 +165,31 @@ class ManufactoriaFeedbackLLM(LLM):
         cutoff_step = current_step - self.cleanup_retention
         keys_to_delete = []
         
-        # Find keys that belong to old steps
+        # Find keys that belong to old steps (both training and evaluation)
         for key in list(self.request_test_cases.keys()):
+            step_num = None
+            
             if key.startswith("step_"):
                 try:
                     # Extract step number from key like "step_123_0-0"
                     step_part = key.split("_")[1]
                     if step_part.isdigit():
                         step_num = int(step_part)
-                        if step_num < cutoff_step:
-                            keys_to_delete.append(key)
                 except (ValueError, IndexError):
-                    # If key doesn't follow expected format, skip
                     continue
+                    
+            elif key.startswith("eval_step_"):
+                try:
+                    # Extract step number from key like "eval_step_123_0-0"
+                    step_part = key.split("_")[2]  # Note: index 2 for eval_step_X
+                    if step_part.isdigit():
+                        step_num = int(step_part)
+                except (ValueError, IndexError):
+                    continue
+            
+            # Mark for deletion if step is too old
+            if step_num is not None and step_num < cutoff_step:
+                keys_to_delete.append(key)
         
         # Remove old metadata
         for key in keys_to_delete:
@@ -174,7 +197,10 @@ class ManufactoriaFeedbackLLM(LLM):
             self.request_datasets.pop(key, None)
         
         if keys_to_delete:
-            logger.info(f"Cleaned up {len(keys_to_delete)} old metadata entries from steps < {cutoff_step}")
+            training_keys = [k for k in keys_to_delete if k.startswith("step_")]
+            eval_keys = [k for k in keys_to_delete if k.startswith("eval_step_")]
+            logger.info(f"Cleaned up {len(keys_to_delete)} old metadata entries from steps < {cutoff_step} "
+                       f"(training: {len(training_keys)}, evaluation: {len(eval_keys)})")
     
     def set_cleanup_config(self, cleanup_frequency: int = 100, cleanup_retention: int = 50):
         """

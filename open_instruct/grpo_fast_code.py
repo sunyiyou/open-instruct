@@ -1090,6 +1090,8 @@ def vllm_generate_thread(
     resume_training_step: int = 1,
     tool_use: bool = False,
     feedback_enabled: bool = False,
+    eval_ground_truths: Optional[List] = None,
+    eval_dataset_names: Optional[List[str]] = None,
 ):
     def generate_with_engines(prompts: List[List[int]], sampling_params: SamplingParams):
         # Split queries between engines
@@ -1190,6 +1192,33 @@ def vllm_generate_thread(
 
         # Evaluate the model
         if eval_prompt_token_ids is not None and (training_step - 1) % eval_freq == 0:
+            # Set up feedback metadata for evaluation if feedback is enabled
+            if feedback_enabled and eval_ground_truths is not None and eval_dataset_names is not None:
+                # Set unique batch ID for evaluation to avoid interference with training batches
+                eval_batch_id = f"eval_step_{training_step}"
+                for engine in vllm_engines:
+                    ray.get(engine.set_batch_id.remote(eval_batch_id))
+                
+                # Split evaluation metadata across engines (same logic as training)
+                queries_per_engine = (len(eval_prompt_token_ids) + len(vllm_engines) - 1) // len(vllm_engines)
+                
+                for engine_idx, engine in enumerate(vllm_engines):
+                    start_idx = engine_idx * queries_per_engine
+                    end_idx = min(start_idx + queries_per_engine, len(eval_prompt_token_ids))
+                    
+                    # Get the metadata slice for this engine's evaluation prompts
+                    engine_eval_ground_truths = eval_ground_truths[start_idx:end_idx]
+                    engine_eval_datasets = eval_dataset_names[start_idx:end_idx]
+                    
+                    # Set metadata for each evaluation prompt
+                    for local_prompt_idx in range(len(engine_eval_ground_truths)):
+                        ground_truth = engine_eval_ground_truths[local_prompt_idx]
+                        dataset = engine_eval_datasets[local_prompt_idx]
+                        
+                        ray.get(engine.set_batch_metadata.remote(
+                            local_prompt_idx, ground_truth, dataset, eval_generation_config.n
+                        ))
+            
             response_ids, finish_reasons, masks, info = generate_with_engines(
                 eval_prompt_token_ids, eval_generation_config
             )
@@ -1775,6 +1804,8 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
             resume_training_step,
             args.tool_use,
             args.enable_feedback_generation,
+            eval_ground_truths,
+            eval_dataset_names,
         ),
     )
     thread.start()
