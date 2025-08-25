@@ -134,6 +134,12 @@ class ManufactoriaFeedbackLLM(LLM):
             request_id = f"{prompt_idx}-{j}"
             self.set_request_metadata(request_id, test_cases, dataset)
     
+    def get_request_metadata(self) -> Dict:
+        return {
+            'test_cases': self.request_test_cases,
+            'dataset': self.request_datasets
+        }
+    
     def is_feedback_enabled_for_request(self, request_id: str) -> bool:
         """Check if feedback should be generated for this request."""
         if not self.config.enable_feedback:
@@ -246,7 +252,7 @@ class ManufactoriaFeedbackLLM(LLM):
             # Make async request to Manufactoria API
             def make_request():
                 response = requests.post(
-                    f"{self.config.api_url}/test_solution",
+                    f"{self.config.api_url}",
                     json=payload,
                     headers={"Content-Type": "application/json"},
                     timeout=self.config.timeout_seconds
@@ -614,6 +620,7 @@ class ManufactoriaFeedbackLLM(LLM):
                         # (i.e., EOS token generated or stop sequence hit)
                         if (self.is_feedback_enabled_for_request(output.request_id) and
                             feedback_iterations[output.request_id] < self.config.max_iterations and
+                            output.request_id not in self.pending_feedback_futures and  # Prevent race condition
                             self._should_provide_feedback(o, eos_token_id)):
                             
                             # Extract DSL code from generated text
@@ -630,12 +637,13 @@ class ManufactoriaFeedbackLLM(LLM):
                                 
                                 if dsl_code and test_cases:
                                     logger.debug(f"Scheduling feedback generation for request {output.request_id} (iteration {feedback_iterations[output.request_id] + 1})")
+                                    # Increment counter immediately to prevent race condition
+                                    feedback_iterations[output.request_id] += 1
                                     # Schedule feedback generation
                                     future = self.executor.submit(
                                         lambda: asyncio.run(self.generate_feedback(dsl_code, test_cases))
                                     )
                                     self.pending_feedback_futures[output.request_id] = (future, o, output)
-                                    feedback_iterations[output.request_id] += 1
                                     output_processed = True
                                 else:
                                     logger.debug(f"No DSL code or test cases found for request {output.request_id} - skipping feedback")

@@ -246,6 +246,33 @@ CHAT_TEMPLATES = {
         "{% endif %}"
         "{% endfor %}"
     ),
+
+    "qwen3_postpend_think": (
+        "<|im_start|>system\n"
+        "A conversation between User and Assistant. "
+        "The user asks a question, and the Assistant solves it. "
+        "The assistant first thinks about the reasoning process in "
+        "the mind and then provides the user with the answer. "
+        "The reasoning process and answer are enclosed within <think> </think> "
+        "and <answer> </answer> tags, respectively, "
+        "i.e., <think> reasoning process here </think> "
+        "<answer> answer here </answer>."
+        "<|im_end|>\n"
+        "{% for message in messages %}"
+        "{% if message['role'] == 'user' %}"
+        "{{ '<|im_start|>user\n' + message['content'] + '<|im_end|>\n' }}"
+        "{% elif message['role'] == 'assistant' %}"
+        "{% if not loop.last %}"
+        "{{ '<|im_start|>assistant\n'  + message['content'] + '<|im_end|>\n' }}"
+        "{% else %}"
+        "{{ '<|im_start|>assistant\n'  + message['content'] + '<|im_end|>'}}"
+        "{% endif %}"
+        "{% endif %}"
+        "{% if loop.last and add_generation_prompt %}"
+        "{{ '<|im_start|>assistant\n<think>' }}"
+        "{% endif %}"
+        "{% endfor %}"
+    ),
     "tulu_thinker": (
         "{% for message in messages %}"
         "{% if message['role'] == 'system' %}"

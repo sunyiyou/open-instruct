@@ -1171,12 +1171,9 @@ def vllm_generate_thread(
                     ground_truth = engine_ground_truths[local_prompt_idx]
                     dataset = engine_datasets[local_prompt_idx]
                     
-                    # For Manufactoria, the ground truth should contain test cases
-                    if isinstance(ground_truth, dict) and "test_cases" in ground_truth:
-                        test_cases = ground_truth["test_cases"]
-                        ray.get(engine.set_batch_metadata.remote(
-                            local_prompt_idx, test_cases, dataset, generation_config.n
-                        ))
+                    ray.get(engine.set_batch_metadata.remote(
+                        local_prompt_idx, ground_truth, dataset, generation_config.n
+                    ))
 
         with Timer("🔥 Generation time"):
             response_ids, finish_reasons, masks, info = generate_with_engines(g_queries_list, generation_config)
