@@ -189,6 +189,21 @@ class LLMRayActor:
         """Set batch metadata for feedback-based generation (if supported).""" 
         if hasattr(self.llm, 'set_batch_metadata'):
             return self.llm.set_batch_metadata(prompt_idx, test_cases, dataset, n_samples)
+    
+    def clear_metadata(self):
+        """Clear metadata for feedback-based generation (if supported)."""
+        if hasattr(self.llm, 'clear_metadata'):
+            return self.llm.clear_metadata()
+    
+    def set_batch_id(self, batch_id: str):
+        """Set batch ID for feedback-based generation (if supported)."""
+        if hasattr(self.llm, 'set_batch_id'):
+            return self.llm.set_batch_id(batch_id)
+    
+    def cleanup_metadata(self, current_step=None):
+        """Manually trigger metadata cleanup for feedback-based generation (if supported)."""
+        if hasattr(self.llm, 'cleanup_metadata'):
+            return self.llm.cleanup_metadata(current_step)
 
 
 def create_vllm_engines(

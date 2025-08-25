@@ -58,6 +58,8 @@ class ManufactoriaFeedbackConfig:
     timeout_seconds: float = 5.0
     feedback_format: str = "detailed"  # "detailed" or "minimal"
     feedback_on_pass: bool = True  # Whether to provide feedback when all tests pass
+    cleanup_frequency: int = 100  # Clean up old metadata every N steps
+    cleanup_retention: int = 50   # Keep metadata for last N steps
     
     def __post_init__(self):
         if self.feedback_datasets is None:
@@ -99,9 +101,12 @@ class ManufactoriaFeedbackLLM(LLM):
         # Track pending feedback requests
         self.pending_feedback_futures = {}
         
-        # Store test cases and dataset info per request
+        # Store test cases and dataset info per request with batch isolation
         self.request_test_cases = {}
         self.request_datasets = {}
+        self.current_batch_id = None  # Track current batch for isolation
+        self.cleanup_frequency = self.config.cleanup_frequency
+        self.cleanup_retention = self.config.cleanup_retention
         
         # Override sampling params to ensure n=1 for feedback consistency
         self.single_n_sampling_params = None
@@ -115,14 +120,79 @@ class ManufactoriaFeedbackLLM(LLM):
             test_cases: List of test case dictionaries for Manufactoria API
             dataset: Dataset name (e.g., "manufactoria")
         """
-        self.request_test_cases[request_id] = test_cases
-        self.request_datasets[request_id] = dataset
+        # Create batch-aware key to prevent cross-batch interference
+        batch_aware_key = f"{self.current_batch_id}_{request_id}" if self.current_batch_id else request_id
+        self.request_test_cases[batch_aware_key] = test_cases
+        self.request_datasets[batch_aware_key] = dataset
+    
+    def set_batch_id(self, batch_id: str):
+        """
+        Set the current batch ID for metadata isolation.
+        
+        Args:
+            batch_id: Unique identifier for the current batch
+        """
+        self.current_batch_id = batch_id
+        
+        # Trigger cleanup if needed
+        if batch_id.startswith("step_"):
+            try:
+                current_step = int(batch_id.split("_")[1])
+                if current_step % self.cleanup_frequency == 0:
+                    self._cleanup_old_metadata(current_step)
+            except (ValueError, IndexError):
+                # If batch_id doesn't follow expected format, skip cleanup
+                pass
+    
+    def _cleanup_old_metadata(self, current_step: int):
+        """
+        Clean up metadata from old batches to prevent memory leaks.
+        
+        Args:
+            current_step: Current training step number
+        """
+        cutoff_step = current_step - self.cleanup_retention
+        keys_to_delete = []
+        
+        # Find keys that belong to old steps
+        for key in list(self.request_test_cases.keys()):
+            if key.startswith("step_"):
+                try:
+                    # Extract step number from key like "step_123_0-0"
+                    step_part = key.split("_")[1]
+                    if step_part.isdigit():
+                        step_num = int(step_part)
+                        if step_num < cutoff_step:
+                            keys_to_delete.append(key)
+                except (ValueError, IndexError):
+                    # If key doesn't follow expected format, skip
+                    continue
+        
+        # Remove old metadata
+        for key in keys_to_delete:
+            self.request_test_cases.pop(key, None)
+            self.request_datasets.pop(key, None)
+        
+        if keys_to_delete:
+            logger.info(f"Cleaned up {len(keys_to_delete)} old metadata entries from steps < {cutoff_step}")
+    
+    def set_cleanup_config(self, cleanup_frequency: int = 100, cleanup_retention: int = 50):
+        """
+        Configure cleanup behavior.
+        
+        Args:
+            cleanup_frequency: Clean up every N steps (default: 100)
+            cleanup_retention: Keep metadata for last N steps (default: 50)
+        """
+        self.cleanup_frequency = max(1, cleanup_frequency)
+        self.cleanup_retention = max(1, cleanup_retention)
     
     def set_batch_metadata(self, prompt_idx: int, test_cases: List[Dict], dataset: str, n_samples: int):
         """
         Set metadata for all completions of a prompt when n > 1.
         
-        This creates metadata for all request IDs: "0-0", "0-1", "0-2", etc.
+        This creates metadata for all request IDs: "0-0", "0-1", etc.
+        The current batch_id ensures isolation across batches.
         
         Args:
             prompt_idx: Index of the prompt in the batch (0, 1, 2, ...)
@@ -133,6 +203,32 @@ class ManufactoriaFeedbackLLM(LLM):
         for j in range(n_samples):
             request_id = f"{prompt_idx}-{j}"
             self.set_request_metadata(request_id, test_cases, dataset)
+    
+    def clear_metadata(self):
+        """
+        Clear all metadata to prepare for a new batch.
+        This prevents metadata from previous batches interfering with current batch.
+        """
+        self.request_test_cases.clear()
+        self.request_datasets.clear()
+    
+    def cleanup_metadata(self, current_step: Optional[int] = None):
+        """
+        Manually trigger metadata cleanup.
+        
+        Args:
+            current_step: Current training step. If not provided, cleanup all old metadata.
+        """
+        if current_step is not None:
+            self._cleanup_old_metadata(current_step)
+        else:
+            # If no current step provided, cleanup everything except the current batch
+            if self.current_batch_id and self.current_batch_id.startswith("step_"):
+                try:
+                    current_step = int(self.current_batch_id.split("_")[1])
+                    self._cleanup_old_metadata(current_step)
+                except (ValueError, IndexError):
+                    pass
     
     def get_request_metadata(self) -> Dict:
         return {
@@ -145,7 +241,9 @@ class ManufactoriaFeedbackLLM(LLM):
         if not self.config.enable_feedback:
             return False
         
-        dataset = self.request_datasets.get(request_id, "")
+        # Use batch-aware key to look up dataset
+        batch_aware_key = f"{self.current_batch_id}_{request_id}" if self.current_batch_id else request_id
+        dataset = self.request_datasets.get(batch_aware_key, "")
         return dataset.lower() in self.feedback_datasets
     
     def _should_provide_feedback(self, output, eos_token_id: Optional[int]) -> bool:
@@ -633,7 +731,9 @@ class ManufactoriaFeedbackLLM(LLM):
                                 logger.debug(f"Skipping duplicate feedback for request {output.request_id} (iteration {feedback_iterations[output.request_id]})")
                             else:
                                 dsl_code = self.extract_dsl_code(full_text)
-                                test_cases = self.request_test_cases.get(output.request_id, [])
+                                # Use batch-aware key to look up test cases
+                                batch_aware_key = f"{self.current_batch_id}_{output.request_id}" if self.current_batch_id else output.request_id
+                                test_cases = self.request_test_cases.get(batch_aware_key, [])
                                 
                                 if dsl_code and test_cases:
                                     logger.debug(f"Scheduling feedback generation for request {output.request_id} (iteration {feedback_iterations[output.request_id] + 1})")

@@ -402,6 +402,10 @@ class Args:
     """Format for feedback messages"""
     feedback_on_pass: bool = True
     """Whether to provide feedback when all tests pass"""
+    feedback_cleanup_frequency: int = 100
+    """Clean up old feedback metadata every N steps to prevent memory leaks"""
+    feedback_cleanup_retention: int = 50
+    """Keep feedback metadata for last N steps during cleanup"""
 
     def __post_init__(self):
         assert self.num_samples_per_prompt_rollout > 0, "Number of samples per prompt must be greater than 0!"
@@ -1154,6 +1158,11 @@ def vllm_generate_thread(
         if feedback_enabled and feedback_metadata is not None:
             ground_truths, datasets = feedback_metadata
             
+            # Set unique batch ID for this training step to prevent cross-batch interference
+            batch_id = f"step_{training_step}"
+            for engine in vllm_engines:
+                ray.get(engine.set_batch_id.remote(batch_id))
+            
             # Split the metadata to match how prompts are distributed across engines
             # This mirrors the exact same logic used in generate_with_engines
             queries_per_engine = (len(g_queries_list) + len(vllm_engines) - 1) // len(vllm_engines)
@@ -1651,6 +1660,8 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
             "timeout_seconds": args.feedback_timeout_seconds,
             "feedback_format": args.feedback_format,
             "feedback_on_pass": args.feedback_on_pass,
+            "cleanup_frequency": args.feedback_cleanup_frequency,
+            "cleanup_retention": args.feedback_cleanup_retention,
         }
 
     vllm_engines = create_vllm_engines(
