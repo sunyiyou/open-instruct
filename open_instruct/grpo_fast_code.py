@@ -122,6 +122,7 @@ from open_instruct.utils import (
     sync_gs_bucket,
 )
 from open_instruct.vllm_utils3 import create_vllm_engines, init_process_group
+from open_instruct.sqlite_logger import SQLiteLogger
 
 api = HfApi()
 INVALID_LOGPROB = 1.0
@@ -406,6 +407,16 @@ class Args:
     """Clean up old feedback metadata every N steps to prevent memory leaks"""
     feedback_cleanup_retention: int = 50
     """Keep feedback metadata for last N steps during cleanup"""
+    
+    # SQLite logging settings
+    enable_sqlite_logging: bool = False
+    """Whether to enable SQLite logging of responses and metrics"""
+    sqlite_db_path: Optional[str] = None
+    """Path to the SQLite database file. If None, defaults to {output_dir}/training_responses.db"""
+    sqlite_autocommit: bool = True
+    """Whether to auto-commit SQLite transactions"""
+    sqlite_journal_mode: str = "WAL"
+    """SQLite journal mode (WAL, DELETE, TRUNCATE, MEMORY, OFF)"""
 
     def __post_init__(self):
         assert self.num_samples_per_prompt_rollout > 0, "Number of samples per prompt must be greater than 0!"
@@ -436,6 +447,10 @@ class Args:
                 if tool not in ["search", "code"]:
                     raise ValueError(f"Tool {tool} is not supported. Supported tools are: search, code")
             assert len(self.tools) == len(set(self.tools)), "Duplicate tools are not allowed"
+        
+        # Set default SQLite database path if not provided
+        if self.enable_sqlite_logging and self.sqlite_db_path is None:
+            self.sqlite_db_path = os.path.join(self.output_dir, "training_responses.db")
 
 
 def masked_mean(values: torch.Tensor, mask: torch.Tensor, axis: Optional[int] = None) -> torch.Tensor:
@@ -1233,6 +1248,7 @@ def data_preparation_thread(
     args: Args,
     tokenizer: PreTrainedTokenizer,
     num_training_steps: int,
+    sqlite_logger: Optional[SQLiteLogger] = None,
 ):
     for training_step in range(1, num_training_steps + 1):
         # Get next batch of prompts and responses
@@ -1489,6 +1505,43 @@ def data_preparation_thread(
                 json.dump(traces, f)
                 f.write("\n")
 
+        # SQLite logging
+        if sqlite_logger is not None and args.enable_sqlite_logging:
+            with Timer("💾 [Data Preparation Thread] SQLite logging"):
+                # Calculate epoch_id based on training_step
+                # Each training step processes num_unique_prompts_rollout * num_samples_per_prompt_rollout episodes
+                episode = training_step * args.num_unique_prompts_rollout * args.num_samples_per_prompt_rollout
+                # We need to estimate the total dataset size for epoch calculation
+                # Since we don't have direct access to train_dataset here, we use total_episodes as proxy
+                estimated_dataset_size = args.total_episodes // args.num_samples_per_prompt_rollout
+                epoch_id = episode / args.num_samples_per_prompt_rollout / estimated_dataset_size
+                
+                # Log responses to SQLite
+                sqlite_logger.log_responses(
+                    training_step=training_step,
+                    epoch_id=epoch_id,
+                    queries=decoded_queries,  # Use decoded queries for readability
+                    responses=responses,
+                    decoded_responses=decoded_responses,
+                    scores=scores.tolist(),
+                    ground_truths=ground_truths,
+                    datasets=datasets,
+                    finish_reasons=finish_reasons,
+                    advantages=advantages.tolist() if advantages is not None else None,
+                    metrics=metrics,
+                    infos=infos,
+                    num_samples_per_prompt_rollout=args.num_samples_per_prompt_rollout,
+                    # Additional data
+                    masks=masks,
+                    good_outputs=good_outputs,
+                    num_calls=num_calls,
+                    timeouts=timeouts,
+                    tool_errors=tool_errors,
+                    tool_outputs=tool_outputs,
+                    tool_runtimes=tool_runtimes,
+                    tool_calleds=tool_calleds,
+                )
+
         # Put the packed sequences and metrics into the output queue
         packed_sequences_Q.put(
             {
@@ -1575,6 +1628,21 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
         "hyperparameters",
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
+
+    # ------------------------------------------------------------
+    # Set up SQLite logger
+    sqlite_logger = None
+    if args.enable_sqlite_logging:
+        sqlite_logger = SQLiteLogger(
+            db_path=args.sqlite_db_path,
+            enabled=True,
+            autocommit=args.sqlite_autocommit,
+            journal_mode=args.sqlite_journal_mode,
+        )
+        print(f"✅ SQLite logging enabled: {args.sqlite_db_path}")
+        print(f"📊 SQLite logger stats: {sqlite_logger.get_stats()}")
+    else:
+        print("⚠️ SQLite logging disabled")
 
     # ------------------------------------------------------------
     # Set up datasets
@@ -1821,6 +1889,7 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
             args,
             tokenizer,
             args.num_training_steps,
+            sqlite_logger,
         ),
     )
     packing_thread.start()
@@ -2087,6 +2156,14 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
         except Exception as cleanup_error:
             print(f"Warning: Error during LLM judge cleanup: {cleanup_error}")
 
+        # Close SQLite logger
+        if sqlite_logger is not None:
+            try:
+                sqlite_logger.close()
+                print("✅ SQLite logger closed")
+            except Exception as cleanup_error:
+                print(f"Warning: Error during SQLite logger cleanup: {cleanup_error}")
+
         ray.shutdown()
         os._exit(1)
         raise  # Re-raise the exception after shutdown
@@ -2102,6 +2179,14 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
         print("✅ LLM judge clients cleaned up")
     except Exception as cleanup_error:
         print(f"Warning: Error during LLM judge cleanup: {cleanup_error}")
+
+    # Close SQLite logger
+    if sqlite_logger is not None:
+        try:
+            sqlite_logger.close()
+            print("✅ SQLite logger closed")
+        except Exception as cleanup_error:
+            print(f"Warning: Error during SQLite logger cleanup: {cleanup_error}")
 
     ray.shutdown()
 
