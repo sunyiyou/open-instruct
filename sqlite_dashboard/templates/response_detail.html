@@ -1,0 +1,329 @@
+{% extends "base.html" %}
+
+{% block title %}Response {{ response_key }} - SQLite Training Database{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1><i class="bi bi-eye"></i> Response Details</h1>
+            <div>
+                <a href="{{ url_for('responses') }}" class="btn btn-secondary">
+                    <i class="bi bi-arrow-left"></i> Back to Responses
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-12">
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="mb-0">
+                    <code>{{ response_key }}</code>
+                    {% if response.all_pass == 1.0 %}
+                        <span class="badge bg-success ms-2">Successful</span>
+                    {% endif %}
+                </h5>
+            </div>
+            <div class="card-body">
+                <!-- Basic Information -->
+                <div class="row mb-4">
+                    <div class="col-md-6">
+                        <h6>Basic Information</h6>
+                        <table class="table table-sm">
+                            <tbody>
+                                <tr>
+                                    <td><strong>Query ID:</strong></td>
+                                    <td>
+                                        <a href="{{ url_for('query_detail', query_id=response.query_id) }}">
+                                            <code>{{ response.query_id }}</code>
+                                        </a>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Training Step:</strong></td>
+                                    <td>{{ response.training_step }}</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Epoch:</strong></td>
+                                    <td>{{ "%.6f"|format(response.epoch_id) }}</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Rollout ID:</strong></td>
+                                    <td>{{ response.rollout_id }}</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Prompt Index:</strong></td>
+                                    <td>{{ response.prompt_idx }}</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <div class="col-md-6">
+                        <h6>Performance Metrics</h6>
+                        <table class="table table-sm">
+                            <tbody>
+                                <tr>
+                                    <td><strong>Score:</strong></td>
+                                    <td>
+                                        <span class="badge {% if response.score > 5 %}bg-success{% elif response.score > 0 %}bg-warning{% else %}bg-danger{% endif %}">
+                                            {{ "%.4f"|format(response.score) if response.score else 'N/A' }}
+                                        </span>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td><strong>All Pass:</strong></td>
+                                    <td>
+                                        {% if response.all_pass == 1.0 %}
+                                            <i class="bi bi-check-circle-fill text-success"></i> Yes
+                                        {% else %}
+                                            <i class="bi bi-x-circle-fill text-danger"></i> No
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Pass Rate:</strong></td>
+                                    <td>{{ "%.2f"|format(response.pass_rate) if response.pass_rate else 'N/A' }}</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Dataset:</strong></td>
+                                    <td><span class="badge bg-secondary">{{ response.dataset }}</span></td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Finish Reason:</strong></td>
+                                    <td>{{ response.finish_reason }}</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Timing and Tool Information -->
+                {% if response.timeout is defined or response.tool_error is defined or response.tool_output is defined or response.tool_runtime is defined or response.tool_called is defined %}
+                <div class="row mb-4">
+                    <div class="col-12">
+                        <h6>Tool Execution Information</h6>
+                        <div class="table-responsive">
+                            <table class="table table-sm">
+                                <tbody>
+                                    <tr>
+                                        <td><strong>Timeout:</strong></td>
+                                        <td>{{ response.timeout if response.timeout is defined else 'N/A' }}</td>
+                                    </tr>
+                                    <tr>
+                                        <td><strong>Tool Called:</strong></td>
+                                        <td>
+                                            {% if response.tool_called %}
+                                                <i class="bi bi-check-circle-fill text-success"></i> Yes
+                                            {% else %}
+                                                <i class="bi bi-x-circle-fill text-muted"></i> No
+                                            {% endif %}
+                                        </td>
+                                    </tr>
+                                    <tr>
+                                        <td><strong>Tool Runtime:</strong></td>
+                                        <td>{{ "%.4f"|format(response.tool_runtime) if response.tool_runtime else 'N/A' }}s</td>
+                                    </tr>
+                                    <tr>
+                                        <td><strong>Number of Calls:</strong></td>
+                                        <td>{{ response.num_calls if response.num_calls is defined else 'N/A' }}</td>
+                                    </tr>
+                                    <tr>
+                                        <td><strong>Tool Error:</strong></td>
+                                        <td>
+                                            {% if response.tool_error %}
+                                                <span class="text-danger">{{ response.tool_error }}</span>
+                                            {% else %}
+                                                <span class="text-muted">None</span>
+                                            {% endif %}
+                                        </td>
+                                    </tr>
+                                    <tr>
+                                        <td><strong>Tool Output:</strong></td>
+                                        <td>
+                                            {% if response.tool_output %}
+                                                <div class="json-data">{{ response.tool_output }}</div>
+                                            {% else %}
+                                                <span class="text-muted">None</span>
+                                            {% endif %}
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+
+                <!-- Response Text -->
+                {% if response.response_text %}
+                <div class="row mb-4">
+                    <div class="col-12">
+                        <h6>Response Text</h6>
+                        <div class="card">
+                            <div class="card-body">
+                                <div class="response-preview">
+                                    <pre style="white-space: pre-wrap; font-family: inherit;">{{ response.response_text }}</pre>
+                                </div>
+                                {% if response.response_text|length > 1000 %}
+                                <div class="text-muted small mt-2">
+                                    <i class="bi bi-info-circle"></i> Long response text with scrollbar for better readability
+                                </div>
+                                {% endif %}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+
+                <!-- Response Tokens -->
+                {% if response.response_tokens %}
+                <div class="row mb-4">
+                    <div class="col-12">
+                        <h6>Response Tokens ({{ response.response_tokens|length }} tokens)</h6>
+
+                        {% if response.response_tokens|length <= 20 %}
+                            <!-- Show all tokens if 20 or fewer -->
+                            <div class="card">
+                                <div class="card-body">
+                                    <div class="token-display">
+                                        {% for token in response.response_tokens %}
+                                            <span class="badge bg-light text-dark me-1 mb-1">{{ token }}</span>
+                                        {% endfor %}
+                                    </div>
+                                </div>
+                            </div>
+                        {% else %}
+                            <!-- Show first 20 tokens with option to expand -->
+                            <div class="card">
+                                <div class="card-body">
+                                    <div class="token-display" id="token-preview">
+                                        {% for token in response.response_tokens[:20] %}
+                                            <span class="badge bg-light text-dark me-1 mb-1">{{ token }}</span>
+                                        {% endfor %}
+                                        <span class="badge bg-secondary me-1 mb-1">... and {{ response.response_tokens|length - 20 }} more</span>
+                                    </div>
+                                    <button class="btn btn-sm btn-outline-primary mt-2" onclick="toggleTokens()">
+                                        <i class="bi bi-chevron-down"></i> Show All Tokens
+                                    </button>
+                                    <div class="token-display d-none" id="token-full">
+                                        {% for token in response.response_tokens %}
+                                            <span class="badge bg-light text-dark me-1 mb-1">{{ token }}</span>
+                                        {% endfor %}
+                                    </div>
+                                </div>
+                            </div>
+                        {% endif %}
+
+                        <!-- Raw JSON view (collapsed by default) -->
+                        <div class="mt-2">
+                            <button class="btn btn-sm btn-outline-secondary" onclick="toggleRawTokens()">
+                                <i class="bi bi-code"></i> Show Raw JSON
+                            </button>
+                            <div class="json-data d-none mt-2" id="raw-tokens">{{ safe_serialize(response.response_tokens) }}</div>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+
+                <!-- Metrics -->
+                {% if response.metrics %}
+                <div class="row mb-4">
+                    <div class="col-12">
+                        <h6>Additional Metrics</h6>
+                        <div class="json-data">{{ safe_serialize(response.metrics) }}</div>
+                    </div>
+                </div>
+                {% endif %}
+
+                <!-- Timestamp Information -->
+                <div class="row">
+                    <div class="col-12">
+                        <h6>Timestamp Information</h6>
+                        <table class="table table-sm">
+                            <tbody>
+                                <tr>
+                                    <td><strong>Timestamp (Unix):</strong></td>
+                                    <td>{{ response.timestamp }}</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Timestamp (ISO):</strong></td>
+                                    <td>{{ response.timestamp_iso }}</td>
+                                </tr>
+                                {% if response.advantage %}
+                                <tr>
+                                    <td><strong>Advantage:</strong></td>
+                                    <td>{{ "%.6f"|format(response.advantage) }}</td>
+                                </tr>
+                                {% endif %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Associated Query -->
+{% if query %}
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0">Associated Query</h5>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <a href="{{ url_for('query_detail', query_id=response.query_id) }}" class="btn btn-primary btn-sm">
+                        <i class="bi bi-arrow-right-circle"></i> View Full Query Details
+                    </a>
+                </div>
+                <div class="card bg-light">
+                    <div class="card-body">
+                        <pre style="white-space: pre-wrap; font-family: inherit;">{{ query }}</pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+    function toggleTokens() {
+        const preview = document.getElementById('token-preview');
+        const full = document.getElementById('token-full');
+        const button = document.querySelector('button[onclick="toggleTokens()"]');
+
+        if (full.classList.contains('d-none')) {
+            preview.classList.add('d-none');
+            full.classList.remove('d-none');
+            button.innerHTML = '<i class="bi bi-chevron-up"></i> Show Less';
+        } else {
+            full.classList.add('d-none');
+            preview.classList.remove('d-none');
+            button.innerHTML = '<i class="bi bi-chevron-down"></i> Show All Tokens';
+        }
+    }
+
+    function toggleRawTokens() {
+        const rawTokens = document.getElementById('raw-tokens');
+        const button = document.querySelector('button[onclick="toggleRawTokens()"]');
+
+        if (rawTokens.classList.contains('d-none')) {
+            rawTokens.classList.remove('d-none');
+            button.innerHTML = '<i class="bi bi-code-slash"></i> Hide Raw JSON';
+        } else {
+            rawTokens.classList.add('d-none');
+            button.innerHTML = '<i class="bi bi-code"></i> Show Raw JSON';
+        }
+    }
+</script>
+{% endblock %}

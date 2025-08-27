@@ -429,7 +429,9 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig):
                 if accelerator.is_main_process:
                     print_rich_single_line_metrics(eval_metrics)
                     for key, value in eval_metrics.items():
-                        writer.add_scalar(key, value, episode)
+                        # Only log scalar values to TensorBoard (skip lists, dicts, etc.)
+                        if isinstance(value, (int, float, np.number)) or (hasattr(value, 'item') and callable(getattr(value, 'item'))):
+                            writer.add_scalar(key, value, episode)
                     if args.with_tracking:
                         wandb.log({"preference_sample_texts": wandb.Table(dataframe=df)})
                     else:

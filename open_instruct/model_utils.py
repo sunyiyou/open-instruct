@@ -627,6 +627,19 @@ def format_value(value):
         if abs(value) < 1e-5:
             return f"{value:.2e}"
         return f"{value:.2f}"
+    # Handle lists more concisely, especially _additional_metrics
+    elif isinstance(value, list):
+        if len(value) == 0:
+            return "[]"
+        elif len(value) <= 3:
+            # For short lists, show all values
+            if all(isinstance(x, (int, float)) for x in value):
+                return f"[{', '.join(f'{x:.2f}' if isinstance(x, float) else str(x) for x in value)}]"
+            else:
+                return f"[{len(value)} items]"
+        else:
+            # For long lists, just show count
+            return f"[{len(value)} items]"
     return str(value)
 
 

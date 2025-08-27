@@ -1,0 +1,235 @@
+{% extends "base.html" %}
+
+{% block title %}Query {{ query_id }} - SQLite Training Database{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1><i class="bi bi-question-circle"></i> Query Details</h1>
+            <div>
+                <a href="{{ url_for('queries') }}" class="btn btn-secondary">
+                    <i class="bi bi-arrow-left"></i> Back to Queries
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-12">
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="mb-0">
+                    <code>{{ query_id }}</code>
+                </h5>
+            </div>
+            <div class="card-body">
+                <!-- Query Text -->
+                {% if query_data.query %}
+                <div class="row mb-4">
+                    <div class="col-12">
+                        <h6>Query Text</h6>
+                        <div class="card bg-light">
+                            <div class="card-body">
+                                <pre style="white-space: pre-wrap; font-family: inherit; margin: 0;">{{ query_data.query }}</pre>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+
+                <!-- Query Metadata -->
+                <div class="row">
+                    <div class="col-12">
+                        <h6>Query Metadata</h6>
+                        <table class="table table-sm">
+                            <tbody>
+                                <tr>
+                                    <td><strong>Query ID:</strong></td>
+                                    <td><code>{{ query_id }}</code></td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Created At:</strong></td>
+                                    <td>{{ query_data.created_at_iso }}</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Created Timestamp:</strong></td>
+                                    <td>{{ query_data.created_at }}</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Successful Responses:</strong></td>
+                                    <td>
+                                        <span class="badge {% if query_data.successful_responses|length > 0 %}bg-success{% else %}bg-danger{% endif %}">
+                                            {{ query_data.successful_responses|length }}
+                                        </span>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Successful Responses -->
+{% if successful_responses %}
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0">
+                    <i class="bi bi-check-circle"></i> Successful Responses ({{ successful_responses|length }})
+                </h5>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-hover table-striped mb-0">
+                        <thead class="table-dark">
+                            <tr>
+                                <th>Response ID</th>
+                                <th>Training Step</th>
+                                <th>Score</th>
+                                <th>Response Length</th>
+                                <th>Timestamp</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for resp in successful_responses %}
+                                <tr>
+                                    <td>
+                                        <code class="small">{{ resp.response_id }}</code>
+                                    </td>
+                                    <td>{{ resp.response_data.training_step }}</td>
+                                    <td>
+                                        <span class="badge {% if resp.response_data.score > 5 %}bg-success{% elif resp.response_data.score > 0 %}bg-warning{% else %}bg-danger{% endif %}">
+                                            {{ "%.2f"|format(resp.response_data.score) }}
+                                        </span>
+                                    </td>
+                                    <td>{{ resp.response_length|number_format }} tokens</td>
+                                    <td>
+                                        <small class="text-muted">{{ resp.response_data.timestamp_iso }}</small>
+                                    </td>
+                                    <td>
+                                        <a href="{{ url_for('response_detail', key=resp.response_id) }}"
+                                           class="btn btn-sm btn-outline-primary">
+                                            <i class="bi bi-eye"></i> View Response
+                                        </a>
+                                    </td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% else %}
+<div class="row">
+    <div class="col-12">
+        <div class="alert alert-warning">
+            <i class="bi bi-exclamation-triangle"></i>
+            No successful responses found for this query.
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<!-- Quick Stats -->
+{% if successful_responses and successful_responses|length > 0 %}
+<div class="row mt-4">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h6 class="mb-0">Response Length Statistics</h6>
+            </div>
+            <div class="card-body">
+                {% set lengths = [] %}
+                {% for resp in successful_responses %}
+                    {% set lengths = lengths + [resp.response_length] %}
+                {% endfor %}
+
+                {% set total_length = 0 %}
+                {% for length in lengths %}
+                    {% set total_length = total_length + length %}
+                {% endfor %}
+
+                {% set avg_length = total_length / lengths|length if lengths|length > 0 else 0 %}
+                {% set min_length = lengths|min if lengths else 0 %}
+                {% set max_length = lengths|max if lengths else 0 %}
+
+                <table class="table table-sm">
+                    <tbody>
+                        <tr>
+                            <td><strong>Average:</strong></td>
+                            <td>{{ "%.0f"|format(avg_length) }} tokens</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Minimum:</strong></td>
+                            <td>{{ min_length|number_format }} tokens</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Maximum:</strong></td>
+                            <td>{{ max_length|number_format }} tokens</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Total:</strong></td>
+                            <td>{{ total_length|number_format }} tokens</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h6 class="mb-0">Score Statistics</h6>
+            </div>
+            <div class="card-body">
+                {% set scores = [] %}
+                {% for resp in successful_responses %}
+                    {% set scores = scores + [resp.response_data.score] %}
+                {% endfor %}
+
+                {% set total_score = 0 %}
+                {% for score in scores %}
+                    {% set total_score = total_score + score %}
+                {% endfor %}
+
+                {% set avg_score = total_score / scores|length if scores|length > 0 else 0 %}
+                {% set min_score = scores|min if scores else 0 %}
+                {% set max_score = scores|max if scores else 0 %}
+
+                <table class="table table-sm">
+                    <tbody>
+                        <tr>
+                            <td><strong>Average Score:</strong></td>
+                            <td>{{ "%.2f"|format(avg_score) }}</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Minimum Score:</strong></td>
+                            <td>{{ "%.2f"|format(min_score) }}</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Maximum Score:</strong></td>
+                            <td>{{ "%.2f"|format(max_score) }}</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Score Range:</strong></td>
+                            <td>{{ "%.2f"|format(max_score - min_score) }}</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{% endblock %}

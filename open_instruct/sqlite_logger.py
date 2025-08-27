@@ -35,7 +35,7 @@ class SQLiteLogger:
         db_path: str,
         enabled: bool = True,
         autocommit: bool = True,
-        journal_mode: str = "WAL",
+        journal_mode: str = "DELETE",
     ):
         """
         Initialize the SQLite logger.
@@ -100,7 +100,7 @@ class SQLiteLogger:
     def _ensure_query_stored(self, query_id: str, query: str):
         """
         Ensure the query is stored in the queries table.
-        
+
         Args:
             query_id: The query identifier
             query: The actual query text
@@ -109,10 +109,45 @@ class SQLiteLogger:
             self.queries_db[query_id] = {
                 'query': query,
                 'created_at': time.time(),
-                'created_at_iso': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
+                'created_at_iso': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()),
+                'successful_responses': []  # List of successful response IDs with their lengths
             }
             self._query_cache.add(query_id)
-    
+
+    def _update_successful_response(self, query_id: str, response_key: str, response_length: int):
+        """
+        Update the queries table with a successful response.
+
+        Args:
+            query_id: The query identifier
+            response_key: The response key (training_step_prompt_idx_rollout_id_timestamp)
+            response_length: Length of the response (number of tokens)
+        """
+        if not self.enabled:
+            return
+
+        # Get existing query data
+        query_data = self.queries_db.get(query_id)
+        if query_data is None:
+            return  # Query not found
+
+        # Initialize successful_responses list if it doesn't exist (for backward compatibility)
+        if 'successful_responses' not in query_data:
+            query_data['successful_responses'] = []
+
+        # Add the successful response
+        successful_response = {
+            'response_id': response_key,
+            'response_length': response_length
+        }
+
+        # Check if this response is already recorded to avoid duplicates
+        if not any(resp['response_id'] == response_key for resp in query_data['successful_responses']):
+            query_data['successful_responses'].append(successful_response)
+
+            # Update the database
+            self.queries_db[query_id] = query_data
+
     def log_responses(
         self,
         training_step: int,
@@ -126,7 +161,8 @@ class SQLiteLogger:
         finish_reasons: List[str],
         advantages: Optional[List[float]] = None,
         metrics: Optional[Dict[str, Any]] = None,
-        infos: Optional[List[Any]] = None,
+        infos: Optional[tuple] = None,
+        additional_metrics: Optional[List[Dict[str, Any]]] = None,
         num_samples_per_prompt_rollout: int = 1,
         **additional_data: Any
     ):
@@ -145,7 +181,8 @@ class SQLiteLogger:
             finish_reasons: List of finish reasons
             advantages: Optional list of advantage values
             metrics: Optional dictionary of metrics
-            infos: Optional additional info (tool usage, etc.)
+            infos: Optional tuple of (num_calls, timeouts, tool_errors, tool_outputs, tool_runtimes, tool_calleds)
+            additional_metrics: Optional list of per-response additional metrics (e.g., pass_rate, all_pass)
             num_samples_per_prompt_rollout: Number of samples per prompt
             **additional_data: Any additional data to store
         """
@@ -155,6 +192,21 @@ class SQLiteLogger:
         timestamp = time.time()
         timestamp_iso = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
         
+        # Unpack infos tuple if provided
+        num_calls = timeouts = tool_errors = tool_outputs = tool_runtimes = tool_calleds = None
+        if infos is not None:
+            if len(infos) != 6:
+                raise ValueError(f"infos tuple must have 6 elements (num_calls, timeouts, tool_errors, tool_outputs, tool_runtimes, tool_calleds), got {len(infos)}")
+            num_calls, timeouts, tool_errors, tool_outputs, tool_runtimes, tool_calleds = infos
+            
+            # Validate that all info arrays have the correct length
+            for info_name, info_array in [
+                ("num_calls", num_calls), ("timeouts", timeouts), ("tool_errors", tool_errors),
+                ("tool_outputs", tool_outputs), ("tool_runtimes", tool_runtimes), ("tool_calleds", tool_calleds)
+            ]:
+                if len(info_array) != len(queries):
+                    raise ValueError(f"{info_name} array length ({len(info_array)}) must match queries length ({len(queries)})")
+
         # Calculate rollout_id based on position within each prompt group
         for i, (query, response, decoded_response, score, ground_truth, dataset, finish_reason) in enumerate(
             zip(queries, responses, decoded_responses, scores, ground_truths, datasets, finish_reasons)
@@ -188,8 +240,34 @@ class SQLiteLogger:
             if advantages is not None and i < len(advantages):
                 response_data['advantage'] = advantages[i]
             
-            if infos is not None and i < len(infos):
-                response_data['info'] = infos[i]
+            # Add individual info components if available
+            if num_calls is not None:
+                response_data['num_calls'] = num_calls[i]
+            if timeouts is not None:
+                response_data['timeout'] = timeouts[i]
+            if tool_errors is not None:
+                response_data['tool_error'] = tool_errors[i]
+            if tool_outputs is not None:
+                response_data['tool_output'] = tool_outputs[i]
+            if tool_runtimes is not None:
+                response_data['tool_runtime'] = tool_runtimes[i]
+            if tool_calleds is not None:
+                response_data['tool_called'] = tool_calleds[i]
+            
+            # Add individual additional metrics if available (e.g., pass_rate, all_pass for this specific response)
+            if additional_metrics is not None and i < len(additional_metrics):
+                individual_metrics = additional_metrics[i]
+                if individual_metrics:
+                    # Extract pass_rate and all_pass specifically, and other metrics
+                    for metric_key, metric_value in individual_metrics.items():
+                        # Remove dataset prefix if present (e.g., "manufactoria_pass_rate" -> "pass_rate")
+                        clean_key = metric_key
+                        if '_' in metric_key:
+                            # Check if it starts with a dataset name
+                            parts = metric_key.split('_', 1)
+                            if len(parts) == 2 and parts[1] in ['pass_rate', 'all_pass']:
+                                clean_key = parts[1]  # Use just "pass_rate" or "all_pass"
+                        response_data[clean_key] = metric_value
             
             # Add metrics (same for all responses in this batch)
             if metrics:
@@ -203,6 +281,11 @@ class SQLiteLogger:
             
             # Store the response
             self.responses_db[response_key] = response_data
+
+            # Check if this is a successful response (all_pass=1.0) and update queries table
+            if response_data.get('all_pass') == 1.0:
+                response_length = len(response_data.get('response_tokens', []))
+                self._update_successful_response(query_id, response_key, response_length)
     
     def get_responses(
         self,

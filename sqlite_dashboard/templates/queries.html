@@ -1,0 +1,181 @@
+{% extends "base.html" %}
+
+{% block title %}Queries - SQLite Training Database{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1><i class="bi bi-question-circle"></i> Queries</h1>
+            <div class="text-muted">
+                <small>{{ total_queries|number_format }} total queries</small>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Filters -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-filter"></i> Filters</h5>
+            </div>
+            <div class="card-body">
+                <form method="GET" class="row g-3">
+                    <div class="col-md-4">
+                        <label for="has_success" class="form-label">Success Status</label>
+                        <select class="form-select" id="has_success" name="has_success">
+                            <option value="">All Queries</option>
+                            <option value="yes" {% if has_success == 'yes' %}selected{% endif %}>Has Successful Responses</option>
+                            <option value="no" {% if has_success == 'no' %}selected{% endif %}>No Successful Responses</option>
+                        </select>
+                    </div>
+
+                    <div class="col-md-4">
+                        <label for="per_page" class="form-label">Items per page</label>
+                        <select class="form-select" id="per_page" name="per_page">
+                            <option value="25" {% if per_page == 25 %}selected{% endif %}>25</option>
+                            <option value="50" {% if per_page == 50 %}selected{% endif %}>50</option>
+                            <option value="100" {% if per_page == 100 %}selected{% endif %}>100</option>
+                        </select>
+                    </div>
+
+                    <div class="col-md-4 d-flex align-items-end">
+                        <button type="submit" class="btn btn-primary">
+                            <i class="bi bi-search"></i> Apply Filters
+                        </button>
+                        <a href="{{ url_for('queries') }}" class="btn btn-secondary ms-2">
+                            <i class="bi bi-x-circle"></i> Clear Filters
+                        </a>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Results -->
+{% if queries %}
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0">Queries ({{ total_queries|number_format }} total)</h5>
+                <span class="badge bg-info">Page {{ page }} of {{ total_pages }}</span>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-hover table-striped mb-0">
+                        <thead class="table-dark">
+                            <tr>
+                                <th>Query ID</th>
+                                <th>Query Preview</th>
+                                <th>Successful Responses</th>
+                                <th>Avg Response Length</th>
+                                <th>Created</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for query_item in queries %}
+                                {% set query_data = query_item.data %}
+                                <tr>
+                                    <td>
+                                        <code class="small">{{ query_item.query_id[:16] }}...</code>
+                                    </td>
+                                    <td>
+                                        <div class="query-preview" style="max-width: 400px;">
+                                            {% if query_data.query %}
+                                                {{ query_data.query[:100] }}{% if query_data.query|length > 100 %}...{% endif %}
+                                            {% else %}
+                                                <span class="text-muted">No query text</span>
+                                            {% endif %}
+                                        </div>
+                                    </td>
+                                    <td>
+                                        <span class="badge {% if query_item.success_count > 0 %}bg-success{% else %}bg-danger{% endif %}">
+                                            {{ query_item.success_count }}
+                                        </span>
+                                        {% if query_item.success_count > 0 %}
+                                            <br><small class="text-muted">responses</small>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {% if query_item.success_count > 0 %}
+                                            {% set avg_length = 0 %}
+                                            {% for resp in query_data.successful_responses %}
+                                                {% set avg_length = avg_length + resp.response_length %}
+                                            {% endfor %}
+                                            {% set avg_length = avg_length / query_item.success_count %}
+                                            {{ "%.0f"|format(avg_length) }} tokens
+                                        {% else %}
+                                            <span class="text-muted">-</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        <small class="text-muted">{{ query_data.created_at_iso }}</small>
+                                    </td>
+                                    <td>
+                                        <a href="{{ url_for('query_detail', query_id=query_item.query_id) }}"
+                                           class="btn btn-sm btn-outline-primary">
+                                            <i class="bi bi-eye"></i> View
+                                        </a>
+                                    </td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Pagination -->
+            {% if total_pages > 1 %}
+            <div class="card-footer">
+                <nav aria-label="Page navigation">
+                    <ul class="pagination justify-content-center mb-0">
+                        {% set start_page = [1, page - 2]|max %}
+                        {% set end_page = [total_pages, page + 2]|min %}
+
+                        {% if page > 1 %}
+                            <li class="page-item">
+                                <a class="page-link" href="{{ url_for('queries', page=page-1, per_page=per_page, has_success=has_success) }}">
+                                    <i class="bi bi-chevron-left"></i>
+                                </a>
+                            </li>
+                        {% endif %}
+
+                        {% for page_num in range(start_page, end_page + 1) %}
+                            <li class="page-item {% if page_num == page %}active{% endif %}">
+                                <a class="page-link" href="{{ url_for('queries', page=page_num, per_page=per_page, has_success=has_success) }}">
+                                    {{ page_num }}
+                                </a>
+                            </li>
+                        {% endfor %}
+
+                        {% if page < total_pages %}
+                            <li class="page-item">
+                                <a class="page-link" href="{{ url_for('queries', page=page+1, per_page=per_page, has_success=has_success) }}">
+                                    <i class="bi bi-chevron-right"></i>
+                                </a>
+                            </li>
+                        {% endif %}
+                    </ul>
+                </nav>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% else %}
+<div class="row">
+    <div class="col-12">
+        <div class="alert alert-info">
+            <i class="bi bi-info-circle"></i>
+            No queries found matching the current filters.
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{% endblock %}

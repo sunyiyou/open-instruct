@@ -415,7 +415,7 @@ class Args:
     """Path to the SQLite database file. If None, defaults to {output_dir}/training_responses.db"""
     sqlite_autocommit: bool = True
     """Whether to auto-commit SQLite transactions"""
-    sqlite_journal_mode: str = "WAL"
+    sqlite_journal_mode: str = "DELETE"
     """SQLite journal mode (WAL, DELETE, TRUNCATE, MEMORY, OFF)"""
 
     def __post_init__(self):
@@ -1281,7 +1281,7 @@ def data_preparation_thread(
         with Timer("🔥 [Data Preparation Thread] Decoding responses", noop=True):
             decoded_responses = tokenizer.batch_decode(responses, skip_special_tokens=True)
             decoded_queries = tokenizer.batch_decode(queries, skip_special_tokens=True)
-            decoded_queries = [extract_user_query(query) for query in decoded_queries]
+            # decoded_queries = [extract_user_query(query) for query in decoded_queries]
             stop_rate = sum(int(finish_reason == "stop") for finish_reason in finish_reasons) / len(finish_reasons)
 
         with Timer("💰 [Data Preparation Thread] Calculating rewards and advantages"):
@@ -1314,6 +1314,47 @@ def data_preparation_thread(
                 advantages = scores - mean_grouped_rewards
             else:
                 raise ValueError(f"Invalid advantage normalization type: {args.advantage_normalization_type}")
+
+        # SQLite logging - Log ALL raw responses before filtering (if enabled)
+        if sqlite_logger is not None and args.enable_sqlite_logging:
+            with Timer("💾 [Data Preparation Thread] SQLite logging (raw data)"):
+                # Calculate epoch_id based on training_step
+                # Each training step processes num_unique_prompts_rollout * num_samples_per_prompt_rollout episodes
+                episode = training_step * args.num_unique_prompts_rollout * args.num_samples_per_prompt_rollout
+                # We need to estimate the total dataset size for epoch calculation
+                # Since we don't have direct access to train_dataset here, we use total_episodes as proxy
+                estimated_dataset_size = args.total_episodes // args.num_samples_per_prompt_rollout
+                epoch_id = episode / args.num_samples_per_prompt_rollout / estimated_dataset_size
+                
+                # Extract additional_metrics from reward_metrics for individual response logging
+                additional_metrics = reward_metrics.pop('_additional_metrics', None)
+                
+                # Log raw unfiltered responses to SQLite
+                sqlite_logger.log_responses(
+                    training_step=training_step,
+                    epoch_id=epoch_id,
+                    queries=decoded_queries,  # Use decoded queries for readability
+                    responses=responses,
+                    decoded_responses=decoded_responses,
+                    scores=scores.tolist(),
+                    ground_truths=ground_truths,
+                    datasets=datasets,
+                    finish_reasons=finish_reasons,
+                    advantages=advantages.tolist() if advantages is not None else None,
+                    metrics=reward_metrics,  # Use reward_metrics directly since metrics dict not built yet
+                    infos=infos,  # tuple of (num_calls, timeouts, tool_errors, tool_outputs, tool_runtimes, tool_calleds)
+                    additional_metrics=additional_metrics,  # Individual response metrics like pass_rate, all_pass
+                    num_samples_per_prompt_rollout=args.num_samples_per_prompt_rollout,
+                    # Additional data
+                    masks=masks,
+                    good_outputs=good_outputs,
+                    num_calls=num_calls,
+                    timeouts=timeouts,
+                    tool_errors=tool_errors,
+                    tool_outputs=tool_outputs,
+                    tool_runtimes=tool_runtimes,
+                    tool_calleds=tool_calleds,
+                )
 
         with Timer("📦 [Data Preparation Thread] Filtering sequences"):
             # Here we get the max possible score for each prompt, and see how many prompts are unsolved
@@ -1504,43 +1545,6 @@ def data_preparation_thread(
             with open(f"{args.output_dir}/traces_{args.run_name}.jsonl", "a") as f:
                 json.dump(traces, f)
                 f.write("\n")
-
-        # SQLite logging
-        if sqlite_logger is not None and args.enable_sqlite_logging:
-            with Timer("💾 [Data Preparation Thread] SQLite logging"):
-                # Calculate epoch_id based on training_step
-                # Each training step processes num_unique_prompts_rollout * num_samples_per_prompt_rollout episodes
-                episode = training_step * args.num_unique_prompts_rollout * args.num_samples_per_prompt_rollout
-                # We need to estimate the total dataset size for epoch calculation
-                # Since we don't have direct access to train_dataset here, we use total_episodes as proxy
-                estimated_dataset_size = args.total_episodes // args.num_samples_per_prompt_rollout
-                epoch_id = episode / args.num_samples_per_prompt_rollout / estimated_dataset_size
-                
-                # Log responses to SQLite
-                sqlite_logger.log_responses(
-                    training_step=training_step,
-                    epoch_id=epoch_id,
-                    queries=decoded_queries,  # Use decoded queries for readability
-                    responses=responses,
-                    decoded_responses=decoded_responses,
-                    scores=scores.tolist(),
-                    ground_truths=ground_truths,
-                    datasets=datasets,
-                    finish_reasons=finish_reasons,
-                    advantages=advantages.tolist() if advantages is not None else None,
-                    metrics=metrics,
-                    infos=infos,
-                    num_samples_per_prompt_rollout=args.num_samples_per_prompt_rollout,
-                    # Additional data
-                    masks=masks,
-                    good_outputs=good_outputs,
-                    num_calls=num_calls,
-                    timeouts=timeouts,
-                    tool_errors=tool_errors,
-                    tool_outputs=tool_outputs,
-                    tool_runtimes=tool_runtimes,
-                    tool_calleds=tool_calleds,
-                )
 
         # Put the packed sequences and metrics into the output queue
         packed_sequences_Q.put(
@@ -2096,7 +2100,9 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
                 }
                 print_rich_single_line_metrics(eval_metrics)
                 for key, value in eval_metrics.items():
-                    writer.add_scalar(key, value, episode)
+                    # Only log scalar values to TensorBoard (skip lists, dicts, etc.)
+                    if isinstance(value, (int, float, np.number)) or (hasattr(value, 'item') and callable(getattr(value, 'item'))):
+                        writer.add_scalar(key, value, episode)
                 table = {}
                 table["prompt"] = tokenizer.batch_decode(eval_prompt_token_ids)
                 table["response"] = eval_decoded_responses
@@ -2341,6 +2347,11 @@ if __name__ == "__main__":
             if ds_scores:
                 metrics[f"val/{display_name}/scores"] = np.array(ds_scores).mean()
 
+        # Include additional_metrics in the returned metrics for SQLite logging
+        if 'additional_metrics' not in locals():
+            additional_metrics = None
+        metrics['_additional_metrics'] = additional_metrics
+        
         return scores, metrics
 
     main(args, tokenizer_config, model_config, reward_fn)

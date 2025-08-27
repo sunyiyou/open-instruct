@@ -1849,7 +1849,9 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
                 }
                 print_rich_single_line_metrics(eval_metrics)
                 for key, value in eval_metrics.items():
-                    writer.add_scalar(key, value, episode)
+                    # Only log scalar values to TensorBoard (skip lists, dicts, etc.)
+                    if isinstance(value, (int, float, np.number)) or (hasattr(value, 'item') and callable(getattr(value, 'item'))):
+                        writer.add_scalar(key, value, episode)
                 table = {}
                 table["prompt"] = tokenizer.batch_decode(eval_prompt_token_ids)
                 table["response"] = eval_decoded_responses

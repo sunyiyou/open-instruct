@@ -1,0 +1,208 @@
+{% extends "base.html" %}
+
+{% block title %}Responses - SQLite Training Database{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1><i class="bi bi-list-ul"></i> Responses</h1>
+            <div class="text-muted">
+                <small>{{ total_responses|number_format }} total responses</small>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Filters -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-filter"></i> Filters</h5>
+            </div>
+            <div class="card-body">
+                <form method="GET" class="row g-3">
+                    <div class="col-md-3">
+                        <label for="dataset" class="form-label">Dataset</label>
+                        <select class="form-select" id="dataset" name="dataset">
+                            <option value="">All Datasets</option>
+                            {% for dataset_name in unique_datasets %}
+                                <option value="{{ dataset_name }}" {% if filters.dataset == dataset_name %}selected{% endif %}>
+                                    {{ dataset_name }}
+                                </option>
+                            {% endfor %}
+                        </select>
+                    </div>
+
+                    <div class="col-md-3">
+                        <label for="training_step" class="form-label">Training Step</label>
+                        <select class="form-select" id="training_step" name="training_step">
+                            <option value="">All Steps</option>
+                            {% for step in unique_training_steps %}
+                                <option value="{{ step }}" {% if filters.training_step|string == step|string %}selected{% endif %}>
+                                    {{ step }}
+                                </option>
+                            {% endfor %}
+                        </select>
+                    </div>
+
+                    <div class="col-md-3">
+                        <label for="query_id" class="form-label">Query ID</label>
+                        <input type="text" class="form-control" id="query_id" name="query_id"
+                               value="{{ filters.query_id }}" placeholder="Enter query ID">
+                    </div>
+
+                    <div class="col-md-3">
+                        <label for="per_page" class="form-label">Items per page</label>
+                        <select class="form-select" id="per_page" name="per_page">
+                            <option value="25" {% if per_page == 25 %}selected{% endif %}>25</option>
+                            <option value="50" {% if per_page == 50 %}selected{% endif %}>50</option>
+                            <option value="100" {% if per_page == 100 %}selected{% endif %}>100</option>
+                        </select>
+                    </div>
+
+                    <div class="col-12">
+                        <button type="submit" class="btn btn-primary">
+                            <i class="bi bi-search"></i> Apply Filters
+                        </button>
+                        <a href="{{ url_for('responses') }}" class="btn btn-secondary">
+                            <i class="bi bi-x-circle"></i> Clear Filters
+                        </a>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Results -->
+{% if responses %}
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0">Responses ({{ total_responses|number_format }} total)</h5>
+                <span class="badge bg-info">Page {{ page }} of {{ total_pages }}</span>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-hover table-striped mb-0">
+                        <thead class="table-dark">
+                            <tr>
+                                <th>Response Key</th>
+                                <th>Query ID</th>
+                                <th>Training Step</th>
+                                <th>Dataset</th>
+                                <th>Score</th>
+                                <th>Success</th>
+                                <th>Response Length</th>
+                                <th>Timestamp</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for response_item in responses %}
+                                {% set response = response_item.data %}
+                                <tr>
+                                    <td>
+                                        <code class="small">{{ response_item.key }}</code>
+                                    </td>
+                                    <td>
+                                        <a href="{{ url_for('responses', query_id=response.query_id) }}" class="text-decoration-none">
+                                            <code class="small">{{ response.query_id[:12] }}...</code>
+                                        </a>
+                                    </td>
+                                    <td>{{ response.training_step }}</td>
+                                    <td>
+                                        <span class="badge bg-secondary">{{ response.dataset }}</span>
+                                    </td>
+                                    <td>
+                                        {% if response.score %}
+                                            <span class="badge {% if response.score > 5 %}bg-success{% elif response.score > 0 %}bg-warning{% else %}bg-danger{% endif %}">
+                                                {{ "%.2f"|format(response.score) }}
+                                            </span>
+                                        {% else %}
+                                            <span class="text-muted">-</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {% if response.all_pass == 1.0 %}
+                                            <i class="bi bi-check-circle-fill text-success" title="Successful"></i>
+                                        {% else %}
+                                            <i class="bi bi-x-circle-fill text-danger" title="Failed"></i>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {% if response.response_tokens %}
+                                            {{ response.response_tokens|length|number_format }} tokens
+                                        {% else %}
+                                            <span class="text-muted">-</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        <small class="text-muted">{{ response.timestamp_iso }}</small>
+                                    </td>
+                                    <td>
+                                        <a href="{{ url_for('response_detail', key=response_item.key) }}"
+                                           class="btn btn-sm btn-outline-primary">
+                                            <i class="bi bi-eye"></i> View
+                                        </a>
+                                    </td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Pagination -->
+            {% if total_pages > 1 %}
+            <div class="card-footer">
+                <nav aria-label="Page navigation">
+                    <ul class="pagination justify-content-center mb-0">
+                        {% set start_page = [1, page - 2]|max %}
+                        {% set end_page = [total_pages, page + 2]|min %}
+
+                        {% if page > 1 %}
+                            <li class="page-item">
+                                <a class="page-link" href="{{ url_for('responses', page=page-1, per_page=per_page, dataset=filters.dataset, training_step=filters.training_step, query_id=filters.query_id) }}">
+                                    <i class="bi bi-chevron-left"></i>
+                                </a>
+                            </li>
+                        {% endif %}
+
+                        {% for page_num in range(start_page, end_page + 1) %}
+                            <li class="page-item {% if page_num == page %}active{% endif %}">
+                                <a class="page-link" href="{{ url_for('responses', page=page_num, per_page=per_page, dataset=filters.dataset, training_step=filters.training_step, query_id=filters.query_id) }}">
+                                    {{ page_num }}
+                                </a>
+                            </li>
+                        {% endfor %}
+
+                        {% if page < total_pages %}
+                            <li class="page-item">
+                                <a class="page-link" href="{{ url_for('responses', page=page+1, per_page=per_page, dataset=filters.dataset, training_step=filters.training_step, query_id=filters.query_id) }}">
+                                    <i class="bi bi-chevron-right"></i>
+                                </a>
+                            </li>
+                        {% endif %}
+                    </ul>
+                </nav>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% else %}
+<div class="row">
+    <div class="col-12">
+        <div class="alert alert-info">
+            <i class="bi bi-info-circle"></i>
+            No responses found matching the current filters.
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{% endblock %}

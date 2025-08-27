@@ -1,0 +1,183 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - SQLite Training Database{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1><i class="bi bi-database"></i> Database Dashboard</h1>
+            <div class="text-muted">
+                <small>Last updated: <span id="current-time"></span></small>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Statistics Cards -->
+<div class="row mb-4">
+    <div class="col-md-3 mb-3">
+        <div class="card stats-card h-100">
+            <div class="card-body text-center">
+                <i class="bi bi-file-earmark-text display-4 text-primary mb-3"></i>
+                <h3 class="card-title">{{ stats.num_responses|number_format }}</h3>
+                <p class="card-text text-muted">Total Responses</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-3 mb-3">
+        <div class="card stats-card h-100">
+            <div class="card-body text-center">
+                <i class="bi bi-question-circle display-4 text-info mb-3"></i>
+                <h3 class="card-title">{{ stats.num_queries|number_format }}</h3>
+                <p class="card-text text-muted">Total Queries</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-3 mb-3">
+        <div class="card stats-card h-100">
+            <div class="card-body text-center">
+                <i class="bi bi-check-circle display-4 text-success mb-3"></i>
+                <h3 class="card-title">{{ successful_stats.total_successful_responses|number_format }}</h3>
+                <p class="card-text text-muted">Successful Responses</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-3 mb-3">
+        <div class="card stats-card h-100">
+            <div class="card-body text-center">
+                <i class="bi bi-percent display-4 text-warning mb-3"></i>
+                <h3 class="card-title">{{ successful_stats.success_rate_percent|round(1) }}%</h3>
+                <p class="card-text text-muted">Success Rate</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Database Info -->
+<div class="row mb-4">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-info-circle"></i> Database Information</h5>
+            </div>
+            <div class="card-body">
+                <table class="table table-sm">
+                    <tbody>
+                        <tr>
+                            <td><strong>Database Path:</strong></td>
+                            <td><code>{{ stats.db_path }}</code></td>
+                        </tr>
+                        <tr>
+                            <td><strong>Database Size:</strong></td>
+                            <td>{{ stats.db_size_mb }} MB</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Responses:</strong></td>
+                            <td>{{ stats.num_responses|number_format }}</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Queries:</strong></td>
+                            <td>{{ stats.num_queries|number_format }}</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Queries with Success:</strong></td>
+                            <td>{{ successful_stats.total_queries_with_success|number_format }}</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-bar-chart"></i> Response Statistics</h5>
+            </div>
+            <div class="card-body">
+                <table class="table table-sm">
+                    <tbody>
+                        <tr>
+                            <td><strong>Average Response Length:</strong></td>
+                            <td>{{ successful_stats.avg_response_length|round(1) if successful_stats.avg_response_length else 'N/A' }} tokens</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Min Response Length:</strong></td>
+                            <td>{{ successful_stats.min_response_length|number_format if successful_stats.min_response_length else 'N/A' }} tokens</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Max Response Length:</strong></td>
+                            <td>{{ successful_stats.max_response_length|number_format if successful_stats.max_response_length else 'N/A' }} tokens</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Median Response Length:</strong></td>
+                            <td>{{ successful_stats.median_response_length|number_format if successful_stats.median_response_length else 'N/A' }} tokens</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Total Successful Responses:</strong></td>
+                            <td>{{ successful_stats.total_successful_responses|number_format }}</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Quick Actions -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-lightning"></i> Quick Actions</h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-3 mb-3">
+                        <a href="{{ url_for('responses') }}" class="btn btn-primary btn-lg w-100">
+                            <i class="bi bi-list-ul"></i><br>
+                            View Responses
+                        </a>
+                    </div>
+                    <div class="col-md-3 mb-3">
+                        <a href="{{ url_for('queries') }}" class="btn btn-info btn-lg w-100">
+                            <i class="bi bi-question-circle"></i><br>
+                            View Queries
+                        </a>
+                    </div>
+                    <div class="col-md-3 mb-3">
+                        <a href="{{ url_for('search') }}" class="btn btn-success btn-lg w-100">
+                            <i class="bi bi-search"></i><br>
+                            Search Database
+                        </a>
+                    </div>
+                    <div class="col-md-3 mb-3">
+                        <a href="{{ url_for('responses', dataset='manufactoria') }}" class="btn btn-warning btn-lg w-100">
+                            <i class="bi bi-puzzle"></i><br>
+                            Manufactoria Data
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+    function updateTime() {
+        const now = new Date();
+        document.getElementById('current-time').textContent = now.toLocaleString();
+    }
+
+    // Update time every second
+    updateTime();
+    setInterval(updateTime, 1000);
+</script>
+{% endblock %}
