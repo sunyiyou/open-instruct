@@ -1637,13 +1637,22 @@ def data_preparation_thread(
 
                 if group_replay_info:
                     if fresh_additional_metrics is not None:
-                        for key, values in fresh_additional_metrics.items():
-                            replay_stats.update({f"replay/{key}": np.array(values).mean()})
+                        
+                        ds_fresh_additional_metrics = defaultdict(list)
+
+                        for i in range(len(fresh_indices)):
+                            if i < len(fresh_additional_metrics):
+                                for key, value in fresh_additional_metrics[i].items():
+                                    ds_fresh_additional_metrics[key].append(value)
+
+                        for key, values in ds_fresh_additional_metrics.items():
+                            replay_stats.update({f"replay/fresh_{key}": np.array(values).mean()})
 
                     replay_stats.update({
                         "replay/fresh_scores": np.mean(fresh_scores),
                         "replay/fresh_advantages": np.mean(fresh_advantages),
                     })
+
 
                 
 
