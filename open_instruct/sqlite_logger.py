@@ -15,9 +15,11 @@
 import hashlib
 import json
 import os
+import random
 import time
 from typing import Any, Dict, List, Optional, Union
 
+import numpy as np
 from sqlitedict import SqliteDict
 
 
@@ -164,6 +166,7 @@ class SQLiteLogger:
         infos: Optional[tuple] = None,
         additional_metrics: Optional[List[Dict[str, Any]]] = None,
         num_samples_per_prompt_rollout: int = 1,
+        masks: Optional[List[List[int]]] = None,
         **additional_data: Any
     ):
         """
@@ -184,6 +187,7 @@ class SQLiteLogger:
             infos: Optional tuple of (num_calls, timeouts, tool_errors, tool_outputs, tool_runtimes, tool_calleds)
             additional_metrics: Optional list of per-response additional metrics (e.g., pass_rate, all_pass)
             num_samples_per_prompt_rollout: Number of samples per prompt
+            masks: Optional list of mask arrays for each response (for tool use/feedback)
             **additional_data: Any additional data to store
         """
         if not self.enabled:
@@ -235,6 +239,10 @@ class SQLiteLogger:
                 'timestamp': timestamp,
                 'timestamp_iso': timestamp_iso,
             }
+            
+            # Add mask data if provided
+            if masks is not None and i < len(masks):
+                response_data['mask'] = masks[i]
             
             # Add optional data
             if advantages is not None and i < len(advantages):
@@ -390,3 +398,265 @@ class SQLiteLogger:
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit."""
         self.close()
+    
+    def sample_replay_data(
+        self,
+        num_samples: int,
+        strategy: str = "recent",
+        max_age_steps: Optional[int] = None,
+        per_query_limit: int = 5,
+        current_training_step: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """
+        Sample successful responses for experience replay.
+        
+        Args:
+            num_samples: Number of samples to retrieve
+            strategy: Sampling strategy ("recent", "uniform", "diverse")
+            max_age_steps: Maximum age in training steps (None for no limit)
+            per_query_limit: Maximum samples per unique query
+            current_training_step: Current training step for age filtering
+            
+        Returns:
+            List of replay samples, each containing response data and query text
+        """
+        if not self.enabled:
+            return []
+        
+        # Collect all successful responses with metadata
+        candidates = []
+        for query_id, query_data in self.queries_db.items():
+            query_text = query_data.get('query', '')
+            successful_responses = query_data.get('successful_responses', [])
+            
+            # Limit responses per query
+            limited_responses = successful_responses[:per_query_limit] if per_query_limit > 0 else successful_responses
+            
+            for success_info in limited_responses:
+                response_id = success_info['response_id']
+                response_data = self.responses_db.get(response_id)
+                
+                if response_data is None:
+                    continue
+                
+                # Age filtering
+                if max_age_steps is not None:
+                    response_step = response_data.get('training_step', 0)
+                    if current_training_step - response_step > max_age_steps:
+                        continue
+                
+                # Create candidate with all necessary data
+                candidate = {
+                    'query_id': query_id,
+                    'query_text': query_text,
+                    'response_id': response_id,
+                    'training_step': response_data.get('training_step', 0),
+                    'response_tokens': response_data.get('response_tokens', []),
+                    'response_text': response_data.get('response_text', ''),
+                    'ground_truth': response_data.get('ground_truth', ''),
+                    'dataset': response_data.get('dataset', ''),
+                    'finish_reason': response_data.get('finish_reason', 'stop'),
+                    'score': response_data.get('score', 0.0),
+                    'advantage': response_data.get('advantage', 0.0),
+                    'all_pass': response_data.get('all_pass', 0.0),
+                    'timestamp': response_data.get('timestamp', 0.0),
+                    # Include mask data for experience replay
+                    'mask': response_data.get('mask', [1] * len(response_data.get('response_tokens', []))),
+                    # Include any additional metrics that might be useful
+                    'num_calls': response_data.get('num_calls', 0),
+                    'timeout': response_data.get('timeout', 0),
+                    'tool_error': response_data.get('tool_error', ''),
+                    'tool_output': response_data.get('tool_output', ''),
+                    'tool_runtime': response_data.get('tool_runtime', 0),
+                    'tool_called': response_data.get('tool_called', False),
+                }
+                candidates.append(candidate)
+        
+        if not candidates:
+            return []
+        
+        # Apply sampling strategy
+        if strategy == "recent":
+            # Sort by training step (descending) and take recent ones with some randomness
+            candidates.sort(key=lambda x: x['training_step'], reverse=True)
+            # Take top 2x samples and randomly select from them to add some diversity
+            top_candidates = candidates[:min(len(candidates), num_samples * 2)]
+            sampled = random.sample(top_candidates, min(num_samples, len(top_candidates)))
+            
+        elif strategy == "uniform":
+            # Uniform random sampling
+            sampled = random.sample(candidates, min(num_samples, len(candidates)))
+            
+        elif strategy == "diverse":
+            # Maximize query diversity - ensure we get samples from different queries
+            query_groups = {}
+            for candidate in candidates:
+                query_id = candidate['query_id']
+                if query_id not in query_groups:
+                    query_groups[query_id] = []
+                query_groups[query_id].append(candidate)
+            
+            sampled = []
+            queries_used = set()
+            
+            # First pass: one sample per unique query
+            for query_id, group in query_groups.items():
+                if len(sampled) >= num_samples:
+                    break
+                sample = random.choice(group)
+                sampled.append(sample)
+                queries_used.add(query_id)
+            
+            # Second pass: fill remaining slots from all candidates
+            remaining_candidates = [c for c in candidates if c['query_id'] not in queries_used]
+            remaining_needed = num_samples - len(sampled)
+            if remaining_needed > 0 and remaining_candidates:
+                additional = random.sample(remaining_candidates, min(remaining_needed, len(remaining_candidates)))
+                sampled.extend(additional)
+        
+        else:
+            raise ValueError(f"Unknown sampling strategy: {strategy}")
+        
+        return sampled
+    
+    def sample_replay_data_by_query_ids(
+        self,
+        query_ids: List[str],
+        samples_per_query: List[int],
+        strategy: str = "recent",
+        max_age_steps: Optional[int] = None,
+        current_training_step: int = 0,
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Sample successful responses for specific query IDs (for group-level replay).
+        
+        Args:
+            query_ids: List of query IDs to sample for
+            samples_per_query: Number of samples to get for each query ID
+            strategy: Sampling strategy ("recent", "uniform", "diverse")
+            max_age_steps: Maximum age in training steps (None for no limit)
+            current_training_step: Current training step for age filtering
+            
+        Returns:
+            Dictionary mapping query_id to list of replay samples
+        """
+        if not self.enabled:
+            return {}
+        
+        results = {}
+        
+        for query_id, num_samples in zip(query_ids, samples_per_query):
+            if num_samples <= 0:
+                results[query_id] = []
+                continue
+                
+            query_data = self.queries_db.get(query_id)
+            if query_data is None:
+                results[query_id] = []
+                continue
+            
+            query_text = query_data.get('query', '')
+            successful_responses = query_data.get('successful_responses', [])
+            
+            if not successful_responses:
+                results[query_id] = []
+                continue
+            
+            # Collect candidates for this specific query
+            candidates = []
+            for success_info in successful_responses:
+                response_id = success_info['response_id']
+                response_data = self.responses_db.get(response_id)
+                
+                if response_data is None:
+                    continue
+                
+                # Age filtering
+                if max_age_steps is not None:
+                    response_step = response_data.get('training_step', 0)
+                    if current_training_step - response_step > max_age_steps:
+                        continue
+                
+                # Create candidate with all necessary data
+                candidate = {
+                    'query_id': query_id,
+                    'query_text': query_text,
+                    'response_id': response_id,
+                    'training_step': response_data.get('training_step', 0),
+                    'response_tokens': response_data.get('response_tokens', []),
+                    'response_text': response_data.get('response_text', ''),
+                    'ground_truth': response_data.get('ground_truth', ''),
+                    'dataset': response_data.get('dataset', ''),
+                    'finish_reason': response_data.get('finish_reason', 'stop'),
+                    'score': response_data.get('score', 0.0),
+                    'advantage': response_data.get('advantage', 0.0),
+                    'all_pass': response_data.get('all_pass', 0.0),
+                    'timestamp': response_data.get('timestamp', 0.0),
+                    # Include mask data for experience replay
+                    'mask': response_data.get('mask', [1] * len(response_data.get('response_tokens', []))),
+                    # Include any additional metrics that might be useful
+                    'num_calls': response_data.get('num_calls', 0),
+                    'timeout': response_data.get('timeout', 0),
+                    'tool_error': response_data.get('tool_error', ''),
+                    'tool_output': response_data.get('tool_output', ''),
+                    'tool_runtime': response_data.get('tool_runtime', 0),
+                    'tool_called': response_data.get('tool_called', False),
+                }
+                candidates.append(candidate)
+            
+            if not candidates:
+                results[query_id] = []
+                continue
+            
+            # Apply sampling strategy for this query
+            if strategy == "recent":
+                # Sort by training step (descending) and take recent ones with some randomness
+                candidates.sort(key=lambda x: x['training_step'], reverse=True)
+                # Take top 2x samples and randomly select from them to add some diversity
+                top_candidates = candidates[:min(len(candidates), num_samples * 2)]
+                sampled = random.sample(top_candidates, min(num_samples, len(top_candidates)))
+                
+            elif strategy == "uniform":
+                # Uniform random sampling
+                sampled = random.sample(candidates, min(num_samples, len(candidates)))
+                
+            elif strategy == "diverse":
+                # For single query, diversity is less relevant, just use uniform
+                sampled = random.sample(candidates, min(num_samples, len(candidates)))
+            
+            else:
+                raise ValueError(f"Unknown sampling strategy: {strategy}")
+            
+            results[query_id] = sampled
+        
+        return results
+    
+    def get_replay_statistics(self, current_training_step: int = 0) -> Dict[str, Any]:
+        """
+        Get statistics about available replay data.
+        
+        Args:
+            current_training_step: Current training step for age analysis
+            
+        Returns:
+            Dictionary with replay data statistics
+        """
+        if not self.enabled:
+            return {'enabled': False}
+        
+        total_successful = 0
+        unique_queries_with_success = 0
+        
+        for query_data in self.queries_db.values():
+            successful_responses = query_data.get('successful_responses', [])
+            if successful_responses:
+                unique_queries_with_success += 1
+                total_successful += len(successful_responses)
+            
+        
+        return {
+            'total_successful_responses': total_successful,
+            'unique_queries_with_success': unique_queries_with_success,
+            'avg_successes_per_query': total_successful / max(unique_queries_with_success, 1),
+            'success_ratio': unique_queries_with_success / len(self.queries_db),
+        }

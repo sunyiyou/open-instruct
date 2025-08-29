@@ -417,6 +417,20 @@ class Args:
     """Whether to auto-commit SQLite transactions"""
     sqlite_journal_mode: str = "DELETE"
     """SQLite journal mode (WAL, DELETE, TRUNCATE, MEMORY, OFF)"""
+    
+    # Experience replay settings
+    enable_experience_replay: bool = False
+    """Whether to enable group-level experience replay from successful past responses"""
+    replay_min_success_count: int = 1
+    """Minimum number of successful responses needed before enabling replay"""
+    replay_sampling_strategy: Literal["recent", "uniform", "diverse"] = "recent"
+    """Strategy for sampling replay data: 'recent' (bias toward recent), 'uniform' (random), 'diverse' (maximize query diversity)"""
+    replay_max_age_steps: Optional[int] = None
+    """Maximum age (in training steps) of replay data to consider. None means no age limit"""
+    replay_per_query_limit: int = 5
+    """Maximum number of successful responses to use per unique query"""
+    replay_per_group_limit: int = 3
+    """Maximum number of replay samples to add per prompt group"""
 
     def __post_init__(self):
         assert self.num_samples_per_prompt_rollout > 0, "Number of samples per prompt must be greater than 0!"
@@ -451,6 +465,18 @@ class Args:
         # Set default SQLite database path if not provided
         if self.enable_sqlite_logging and self.sqlite_db_path is None:
             self.sqlite_db_path = os.path.join(self.output_dir, "training_responses.db")
+            
+        # Experience replay validation
+        if self.enable_experience_replay and not self.enable_sqlite_logging:
+            raise ValueError("Experience replay requires SQLite logging to be enabled!")
+        if self.replay_min_success_count < 1:
+            raise ValueError(f"replay_min_success_count must be >= 1, got {self.replay_min_success_count}")
+        if self.replay_per_query_limit < 1:
+            raise ValueError(f"replay_per_query_limit must be >= 1, got {self.replay_per_query_limit}")
+        if self.replay_per_group_limit < 1:
+            raise ValueError(f"replay_per_group_limit must be >= 1, got {self.replay_per_group_limit}")
+        if self.replay_per_group_limit > self.num_samples_per_prompt_rollout:
+            print(f"Warning: replay_per_group_limit ({self.replay_per_group_limit}) > num_samples_per_prompt_rollout ({self.num_samples_per_prompt_rollout}). This may lead to more replay than fresh data per group.")
 
 
 def masked_mean(values: torch.Tensor, mask: torch.Tensor, axis: Optional[int] = None) -> torch.Tensor:
@@ -1279,10 +1305,176 @@ def data_preparation_thread(
                     masks[i].append(1)  # never mask the eos token for now?
 
         with Timer("🔥 [Data Preparation Thread] Decoding responses", noop=True):
-            decoded_responses = tokenizer.batch_decode(responses, skip_special_tokens=True)
-            decoded_queries = tokenizer.batch_decode(queries, skip_special_tokens=True)
+            decoded_responses = tokenizer.batch_decode(responses, skip_special_tokens=False)
+            decoded_queries = tokenizer.batch_decode(queries, skip_special_tokens=False)
             # decoded_queries = [extract_user_query(query) for query in decoded_queries]
             stop_rate = sum(int(finish_reason == "stop") for finish_reason in finish_reasons) / len(finish_reasons)
+
+        # ------------------------------------------------------------------------------------------------
+        # Experience Replay: Mix in successful responses from previous training steps (group-level)
+        group_replay_info = {}  # Detailed per-group replay information
+        replay_stats = {}
+        if args.enable_experience_replay and sqlite_logger is not None:
+            with Timer("🔄 [Data Preparation Thread] Adding experience replay data"):
+                # Check if we have enough successful responses to enable replay
+                replay_stats_dict = sqlite_logger.get_replay_statistics()
+                success_count = replay_stats_dict.get('total_successful_responses', 0)
+                if success_count >= args.replay_min_success_count:
+                    # Group-level replay implementation
+                    # First, calculate the structure: we have queries expanded by num_samples_per_prompt_rollout
+                    num_unique_prompts = len(queries) // args.num_samples_per_prompt_rollout
+                    
+                    # Get unique queries (every num_samples_per_prompt_rollout-th query)
+                    unique_queries = []
+                    unique_decoded_queries = []
+                    for i in range(0, len(queries), args.num_samples_per_prompt_rollout):
+                        unique_queries.append(queries[i])
+                        unique_decoded_queries.append(decoded_queries[i])
+                    
+                    # Generate query IDs for unique prompts
+                    unique_query_ids = []
+                    for query_text in unique_decoded_queries:
+                        query_id = sqlite_logger._get_query_id(query_text)
+                        unique_query_ids.append(query_id)
+                    
+                    # Determine how many replay samples per group
+                    samples_per_group = [args.replay_per_group_limit] * len(unique_query_ids)
+                    
+                    # Sample replay data by query IDs
+                    replay_data_by_query = sqlite_logger.sample_replay_data_by_query_ids(
+                        query_ids=unique_query_ids,
+                        samples_per_query=samples_per_group,
+                        strategy=args.replay_sampling_strategy,
+                        max_age_steps=args.replay_max_age_steps,
+                        current_training_step=training_step,
+                    )
+                    
+                    # Build the mixed data maintaining group structure
+                    mixed_queries = []
+                    mixed_responses = []
+                    mixed_decoded_responses = []
+                    mixed_ground_truths = []
+                    mixed_datasets = []
+                    mixed_finish_reasons = []
+                    mixed_masks = []
+                    mixed_num_calls = []
+                    mixed_timeouts = []
+                    mixed_tool_errors = []
+                    mixed_tool_outputs = []
+                    mixed_tool_runtimes = []
+                    mixed_tool_calleds = []
+                    mixed_good_outputs = []
+                    
+                    total_replay_added = 0
+                    groups_with_replay = 0
+                    current_mixed_idx = 0  # Track position in mixed arrays
+                    
+                    for group_idx in range(num_unique_prompts):
+                        # Add fresh rollouts for this group
+                        start_idx = group_idx * args.num_samples_per_prompt_rollout
+                        end_idx = start_idx + args.num_samples_per_prompt_rollout
+                        
+                        # Record the starting position for this group in mixed data
+                        group_start_pos = current_mixed_idx
+                        
+                        # Fresh data
+                        mixed_queries.extend(queries[start_idx:end_idx])
+                        mixed_responses.extend(responses[start_idx:end_idx])
+                        mixed_decoded_responses.extend(decoded_responses[start_idx:end_idx])
+                        mixed_ground_truths.extend(ground_truths[start_idx:end_idx])
+                        mixed_datasets.extend(datasets[start_idx:end_idx])
+                        mixed_finish_reasons.extend(finish_reasons[start_idx:end_idx])
+                        mixed_masks.extend(masks[start_idx:end_idx])
+                        mixed_num_calls.extend(num_calls[start_idx:end_idx])
+                        mixed_timeouts.extend(timeouts[start_idx:end_idx])
+                        mixed_tool_errors.extend(tool_errors[start_idx:end_idx])
+                        mixed_tool_outputs.extend(tool_outputs[start_idx:end_idx])
+                        mixed_tool_runtimes.extend(tool_runtimes[start_idx:end_idx])
+                        mixed_tool_calleds.extend(tool_calleds[start_idx:end_idx])
+                        mixed_good_outputs.extend(good_outputs[start_idx:end_idx])
+                        current_mixed_idx += args.num_samples_per_prompt_rollout
+                        
+                        # Add replay data for this group if available
+                        query_id = unique_query_ids[group_idx]
+                        group_replay_samples = replay_data_by_query.get(query_id, [])
+                        
+                        # Record group information
+                        group_replay_count = len(group_replay_samples)
+                        group_replay_info[group_idx] = {
+                            'query_id': query_id,
+                            'fresh_count': args.num_samples_per_prompt_rollout,
+                            'replay_count': group_replay_count,
+                            'total_count': args.num_samples_per_prompt_rollout + group_replay_count,
+                            'start_pos': group_start_pos,
+                            'end_pos': current_mixed_idx + group_replay_count,
+                            'has_replay': group_replay_count > 0
+                        }
+                        
+                        if group_replay_samples:
+                            groups_with_replay += 1
+                            total_replay_added += len(group_replay_samples)
+                            
+                            for sample in group_replay_samples:
+                                # Tokenize the query text to get query tokens
+                                query_tokens = tokenizer.encode(sample['query_text'], add_special_tokens=False)
+                                mixed_queries.append(query_tokens)
+                                mixed_responses.append(sample['response_tokens'])
+                                mixed_decoded_responses.append(sample['response_text'])
+                                mixed_ground_truths.append(sample['ground_truth'])
+                                mixed_datasets.append(sample['dataset'])
+                                mixed_finish_reasons.append(sample['finish_reason'])
+                                # Use actual mask data from the sample, fallback to all 1s if not available
+                                mixed_masks.append(sample.get('mask', [1] * len(sample['response_tokens'])))
+                                mixed_num_calls.append(sample['num_calls'])
+                                mixed_timeouts.append(sample['timeout'])
+                                mixed_tool_errors.append(sample['tool_error'])
+                                mixed_tool_outputs.append(sample['tool_output'])
+                                mixed_tool_runtimes.append(sample['tool_runtime'])
+                                mixed_tool_calleds.append(sample['tool_called'])                                    
+                                replay_good = True
+                                mixed_good_outputs.append(replay_good)
+                                current_mixed_idx += 1
+                    
+                    if total_replay_added > 0:
+                        # Replace original data with mixed data
+                        queries = mixed_queries
+                        responses = mixed_responses
+                        decoded_responses = mixed_decoded_responses
+                        ground_truths = mixed_ground_truths
+                        datasets = mixed_datasets
+                        finish_reasons = mixed_finish_reasons
+                        masks = mixed_masks
+                        num_calls = mixed_num_calls
+                        timeouts = mixed_timeouts
+                        tool_errors = mixed_tool_errors
+                        tool_outputs = mixed_tool_outputs
+                        tool_runtimes = mixed_tool_runtimes
+                        tool_calleds = mixed_tool_calleds
+                        good_outputs = mixed_good_outputs
+                        
+                        # Update infos tuple
+                        infos = (num_calls, timeouts, tool_errors, tool_outputs, tool_runtimes, tool_calleds)
+                        
+                        replay_db_stats = sqlite_logger.get_replay_statistics() if sqlite_logger else {'unique_queries_with_success': 0}
+                        success_ratio = replay_db_stats.get('success_ratio', 0.0)
+                        unique_queries_with_success = replay_db_stats.get('unique_queries_with_success', 0)
+                        total_unique_queries = len(sqlite_logger.queries_db) if sqlite_logger else 0
+
+                        replay_stats = {
+                            "replay/samples_added": total_replay_added,
+                            "replay/groups_with_data": groups_with_replay,
+                            "replay/total_groups": num_unique_prompts,
+                            "replay/avg_per_group": total_replay_added / max(groups_with_replay, 1),
+                            "replay/success_ratio": success_ratio,
+                            "replay/unique_queries_with_success": unique_queries_with_success,
+                        }
+                        
+                        print(f"📼 Added {total_replay_added} replay samples across {groups_with_replay}/{num_unique_prompts} groups")
+                        print(f"📊 Database success ratio: {success_ratio:.3f} ({unique_queries_with_success}/{total_unique_queries} unique queries with success traces)")
+                    else:
+                        print("📼 No suitable replay samples found")
+                else:
+                    print(f"📼 Not enough successful responses for replay ({success_count} < {args.replay_min_success_count})")
 
         with Timer("💰 [Data Preparation Thread] Calculating rewards and advantages"):
             scores, reward_metrics = asyncio.run(
@@ -1291,33 +1483,81 @@ def data_preparation_thread(
                 )
             )
             scores = np.array(scores)
-            scores_per_prompt = scores.reshape(-1, args.num_samples_per_prompt_rollout)
             
-            if args.advantage_normalization_type == "group":
-                # Group-level normalization: A_k^group = (r_k - mean({r_j}_{j=1}^K)) / std({r_j}_{j=1}^K)
-                # Compute mean and std per prompt group (K samples per group)
-                mean_grouped_rewards = scores_per_prompt.mean(axis=-1)
-                mean_grouped_rewards = np.repeat(mean_grouped_rewards, args.num_samples_per_prompt_rollout, axis=0)
-                std_grouped_rewards = scores_per_prompt.std(axis=-1)
-                std_grouped_rewards = np.repeat(std_grouped_rewards, args.num_samples_per_prompt_rollout, axis=0)
-                advantages = (scores - mean_grouped_rewards) / (std_grouped_rewards + 1e-8)
-            elif args.advantage_normalization_type == "batch":
-                # Batch-level normalization: A_i^batch = (r_i - mean({r_j}_{j=1}^{N*K})) / std({r_j}_{j=1}^{N*K})
-                # Compute mean and std over all samples in the batch
-                mean_batch_rewards = scores.mean()
-                std_batch_rewards = scores.std()
-                advantages = (scores - mean_batch_rewards) / (std_batch_rewards + 1e-8)
-            elif args.advantage_normalization_type == "centered":
-                # Centered normalization: only subtract mean, no std division (used in DR.GRPO)
-                mean_grouped_rewards = scores_per_prompt.mean(axis=-1)
-                mean_grouped_rewards = np.repeat(mean_grouped_rewards, args.num_samples_per_prompt_rollout, axis=0)
-                advantages = scores - mean_grouped_rewards
+            # Handle advantage calculation considering replay data (group-level with recompute only)
+            if group_replay_info:
+                # Group-level replay: Calculate advantages respecting the mixed group structure
+                advantages = []
+                
+                # Process each group using detailed group information
+                for group_idx in sorted(group_replay_info.keys()):
+                    group_info = group_replay_info[group_idx]
+                    start_pos = group_info['start_pos']
+                    end_pos = group_info['end_pos']
+                    
+                    # Extract scores for this extended group (fresh + replay)
+                    group_scores = scores[start_pos:end_pos]
+                    
+                    # Calculate advantages for this group
+                    if args.advantage_normalization_type == "group":
+                        mean_group_reward = group_scores.mean()
+                        std_group_reward = group_scores.std()
+                        group_advantages = (group_scores - mean_group_reward) / (std_group_reward + 1e-8)
+                    elif args.advantage_normalization_type == "batch":
+                        # Use global batch statistics
+                        mean_batch_rewards = scores.mean()
+                        std_batch_rewards = scores.std()
+                        group_advantages = (group_scores - mean_batch_rewards) / (std_batch_rewards + 1e-8)
+                    elif args.advantage_normalization_type == "centered":
+                        mean_group_reward = group_scores.mean()
+                        group_advantages = group_scores - mean_group_reward
+                    
+                    advantages.extend(group_advantages)
+                
+                advantages = np.array(advantages)
             else:
-                raise ValueError(f"Invalid advantage normalization type: {args.advantage_normalization_type}")
+                # Standard case without replay data
+                scores_per_prompt = scores.reshape(-1, args.num_samples_per_prompt_rollout)
+                
+                if args.advantage_normalization_type == "group":
+                    mean_grouped_rewards = scores_per_prompt.mean(axis=-1)
+                    mean_grouped_rewards = np.repeat(mean_grouped_rewards, args.num_samples_per_prompt_rollout, axis=0)
+                    std_grouped_rewards = scores_per_prompt.std(axis=-1)
+                    std_grouped_rewards = np.repeat(std_grouped_rewards, args.num_samples_per_prompt_rollout, axis=0)
+                    advantages = (scores - mean_grouped_rewards) / (std_grouped_rewards + 1e-8)
+                elif args.advantage_normalization_type == "batch":
+                    mean_batch_rewards = scores.mean()
+                    std_batch_rewards = scores.std()
+                    advantages = (scores - mean_batch_rewards) / (std_batch_rewards + 1e-8)
+                elif args.advantage_normalization_type == "centered":
+                    mean_grouped_rewards = scores_per_prompt.mean(axis=-1)
+                    mean_grouped_rewards = np.repeat(mean_grouped_rewards, args.num_samples_per_prompt_rollout, axis=0)
+                    advantages = scores - mean_grouped_rewards
+                else:
+                    raise ValueError(f"Invalid advantage normalization type: {args.advantage_normalization_type}")
+            
+            # Update replay stats with advantage info
+            if group_replay_info:
+                # Calculate replay-specific advantage statistics
+                replay_advantages = []
+                for group_idx in sorted(group_replay_info.keys()):
+                    group_info = group_replay_info[group_idx]
+                    if group_info['has_replay']:
+                        start_pos = group_info['start_pos']
+                        fresh_count = group_info['fresh_count']
+                        replay_count = group_info['replay_count']
+                        # Extract replay advantages (come after fresh data in each group)
+                        replay_start = start_pos + fresh_count
+                        replay_end = replay_start + replay_count
+                        replay_advantages.extend(advantages[replay_start:replay_end])
+                
+                replay_stats.update({
+                    "replay/avg_advantage": np.mean(replay_advantages) if replay_advantages else 0.0,
+                })
 
-        # SQLite logging - Log ALL raw responses before filtering (if enabled)
+        # SQLite logging - Log ONLY fresh responses (exclude replay data to avoid duplicates)
         if sqlite_logger is not None and args.enable_sqlite_logging:
-            with Timer("💾 [Data Preparation Thread] SQLite logging (raw data)"):
+            with Timer("💾 [Data Preparation Thread] SQLite logging (fresh data only)"):
                 # Calculate epoch_id based on training_step
                 # Each training step processes num_unique_prompts_rollout * num_samples_per_prompt_rollout episodes
                 episode = training_step * args.num_unique_prompts_rollout * args.num_samples_per_prompt_rollout
@@ -1325,36 +1565,87 @@ def data_preparation_thread(
                 # Since we don't have direct access to train_dataset here, we use total_episodes as proxy
                 estimated_dataset_size = args.total_episodes // args.num_samples_per_prompt_rollout
                 epoch_id = episode / args.num_samples_per_prompt_rollout / estimated_dataset_size
-                
+
                 # Extract additional_metrics from reward_metrics for individual response logging
                 additional_metrics = reward_metrics.pop('_additional_metrics', None)
-                
-                # Log raw unfiltered responses to SQLite
+
+                # Determine indices of fresh (non-replay) samples
+                if group_replay_info:
+                    fresh_indices = []
+                    for g_idx in sorted(group_replay_info.keys()):
+                        g_info = group_replay_info[g_idx]
+                        start_pos = g_info['start_pos']
+                        fresh_count = g_info['fresh_count']
+                        fresh_indices.extend(range(start_pos, start_pos + fresh_count))
+                else:
+                    fresh_indices = list(range(len(responses)))
+
+                # Filter per-sample arrays to fresh-only
+                fresh_responses = [responses[i] for i in fresh_indices]
+                fresh_decoded_responses = [decoded_responses[i] for i in fresh_indices]
+                fresh_finish_reasons = [finish_reasons[i] for i in fresh_indices]
+                fresh_ground_truths = [ground_truths[i] for i in fresh_indices]
+                fresh_datasets = [datasets[i] for i in fresh_indices]
+                fresh_masks = [masks[i] for i in fresh_indices]
+                fresh_good_outputs = [good_outputs[i] for i in fresh_indices]
+                fresh_num_calls = [num_calls[i] for i in fresh_indices]
+                fresh_timeouts = [timeouts[i] for i in fresh_indices]
+                fresh_tool_errors = [tool_errors[i] for i in fresh_indices]
+                fresh_tool_outputs = [tool_outputs[i] for i in fresh_indices]
+                fresh_tool_runtimes = [tool_runtimes[i] for i in fresh_indices]
+                fresh_tool_calleds = [tool_calleds[i] for i in fresh_indices]
+                fresh_additional_metrics = (
+                    [additional_metrics[i] for i in fresh_indices] if additional_metrics is not None else None
+                )
+
+                # Filter vector arrays
+                fresh_scores = scores[fresh_indices].tolist()
+                fresh_advantages = (
+                    advantages[fresh_indices].tolist() if advantages is not None else None
+                )
+
+                # Decode queries corresponding to fresh indices
+                fresh_decoded_queries = tokenizer.batch_decode(
+                    [queries[i] for i in fresh_indices], skip_special_tokens=False
+                )
+
+                # Log fresh-only responses to SQLite
                 sqlite_logger.log_responses(
                     training_step=training_step,
                     epoch_id=epoch_id,
-                    queries=decoded_queries,  # Use decoded queries for readability
-                    responses=responses,
-                    decoded_responses=decoded_responses,
-                    scores=scores.tolist(),
-                    ground_truths=ground_truths,
-                    datasets=datasets,
-                    finish_reasons=finish_reasons,
-                    advantages=advantages.tolist() if advantages is not None else None,
-                    metrics=reward_metrics,  # Use reward_metrics directly since metrics dict not built yet
-                    infos=infos,  # tuple of (num_calls, timeouts, tool_errors, tool_outputs, tool_runtimes, tool_calleds)
-                    additional_metrics=additional_metrics,  # Individual response metrics like pass_rate, all_pass
+                    queries=fresh_decoded_queries,
+                    responses=fresh_responses,
+                    decoded_responses=fresh_decoded_responses,
+                    scores=fresh_scores,
+                    ground_truths=fresh_ground_truths,
+                    datasets=fresh_datasets,
+                    finish_reasons=fresh_finish_reasons,
+                    advantages=fresh_advantages,
+                    metrics=reward_metrics,
+                    infos=(
+                        fresh_num_calls,
+                        fresh_timeouts,
+                        fresh_tool_errors,
+                        fresh_tool_outputs,
+                        fresh_tool_runtimes,
+                        fresh_tool_calleds,
+                    ),
+                    additional_metrics=fresh_additional_metrics,
                     num_samples_per_prompt_rollout=args.num_samples_per_prompt_rollout,
-                    # Additional data
-                    masks=masks,
-                    good_outputs=good_outputs,
-                    num_calls=num_calls,
-                    timeouts=timeouts,
-                    tool_errors=tool_errors,
-                    tool_outputs=tool_outputs,
-                    tool_runtimes=tool_runtimes,
-                    tool_calleds=tool_calleds,
+                    masks=fresh_masks
                 )
+
+                if group_replay_info:
+                    if fresh_additional_metrics is not None:
+                        for key, values in fresh_additional_metrics.items():
+                            replay_stats.update({f"replay/{key}": np.array(values).mean()})
+
+                    replay_stats.update({
+                        "replay/fresh_scores": np.mean(fresh_scores),
+                        "replay/fresh_advantages": np.mean(fresh_advantages),
+                    })
+
+                
 
         with Timer("📦 [Data Preparation Thread] Filtering sequences"):
             # Here we get the max possible score for each prompt, and see how many prompts are unsolved
@@ -1364,44 +1655,85 @@ def data_preparation_thread(
             if args.apply_r1_style_format_reward and args.additive_format_reward:
                 max_possible_score += args.r1_style_format_reward
             unsolved_batch_size_ratio = ((scores != max_possible_score) > 0).sum() / len(scores)
-            # In GRPO, if the std of grouped rewards is 0, then there is zero gradient for the batch
-            # of args.num_samples_per_prompt_rollout responses, so we need to filter out those batches
-            non_zero_std_mask = scores_per_prompt.std(axis=-1) != 0
             
-            # Check if all scores are zero or if non_zero_std_mask is all False
-            if np.all(scores == 0) or not np.any(non_zero_std_mask):
-                print("Warning: All scores are zero or all std values are zero. Keeping only a few random samples.")
-                # Just keep a few random samples instead of the whole batch
-                # Ensure we keep at least num_mini_batches samples per device to avoid division by zero
-                min_samples_needed = args.num_mini_batches * args.world_size
-                num_samples_to_keep = max(min_samples_needed, min(args.per_device_train_batch_size * 2, len(scores)))
-                if num_samples_to_keep > len(scores):
-                    # If we don't have enough samples, take all of them
-                    non_zero_gradient_index = np.arange(len(scores))
-                    num_samples_to_keep = len(scores)
-                else:
-                    non_zero_gradient_index = np.random.choice(len(scores), size=num_samples_to_keep, replace=False)
-                real_batch_size_ratio = num_samples_to_keep / len(scores)
-            else:
-                real_batch_size_ratio = non_zero_std_mask.sum() * args.num_samples_per_prompt_rollout / len(scores)
-                expanded_mask = np.repeat(non_zero_std_mask, args.num_samples_per_prompt_rollout)
-                non_zero_gradient_index = np.where(expanded_mask)[0]
+            # Handle filtering with group-level replay consideration
+            if group_replay_info:
+                # Group-level replay: Apply filtering using group structure
+                valid_indices = []
+                groups_kept = 0
+                total_groups = len(group_replay_info)
                 
-                # Additional safety check: ensure we have at least num_mini_batches samples per device
-                min_samples_needed = args.num_mini_batches * args.world_size
-                if len(non_zero_gradient_index) < min_samples_needed:
-                    print(f"Warning: After filtering, only {len(non_zero_gradient_index)} samples remain, but need at least {min_samples_needed}. Adding random samples.")
-                    # Get additional random samples to meet minimum requirement
-                    additional_needed = min_samples_needed - len(non_zero_gradient_index)
-                    all_indices = set(range(len(scores)))
-                    remaining_indices = list(all_indices - set(non_zero_gradient_index))
-                    if len(remaining_indices) >= additional_needed:
-                        additional_indices = np.random.choice(remaining_indices, size=additional_needed, replace=False)
-                        non_zero_gradient_index = np.concatenate([non_zero_gradient_index, additional_indices])
-                    else:
-                        # If we still don't have enough, take all available
+                for group_idx in sorted(group_replay_info.keys()):
+                    group_info = group_replay_info[group_idx]
+                    start_pos = group_info['start_pos']
+                    end_pos = group_info['end_pos']
+                    
+                    # Get scores for this group (fresh + replay)
+                    group_scores = scores[start_pos:end_pos]
+                    group_std = group_scores.std()
+                    
+                    # Keep group if it has non-zero std (provides gradient signal)
+                    # OR if it has replay data (valuable examples)
+                    if group_std != 0 or group_info['has_replay']:
+                        valid_indices.extend(range(start_pos, end_pos))
+                        groups_kept += 1
+                
+                if len(valid_indices) > 0:
+                    non_zero_gradient_index = np.array(valid_indices)
+                    real_batch_size_ratio = groups_kept / total_groups
+                    print(f"📼 Group-level filtering: kept {groups_kept}/{total_groups} groups")
+                else:
+                    # Fallback: keep everything if no groups pass filtering
+                    print("📼 No valid groups found, keeping all data")
+                    non_zero_gradient_index = np.arange(len(scores))
+                    real_batch_size_ratio = 1.0
+            else:
+                # Standard filtering without replay data
+                scores_per_prompt = scores.reshape(-1, args.num_samples_per_prompt_rollout)
+                # In GRPO, if the std of grouped rewards is 0, then there is zero gradient for the batch
+                # of args.num_samples_per_prompt_rollout responses, so we need to filter out those batches
+                non_zero_std_mask = scores_per_prompt.std(axis=-1) != 0
+            
+            
+            # Continue with standard filtering logic if no replay data
+            if not group_replay_info:
+                # Check if all scores are zero or if non_zero_std_mask is all False
+                if np.all(scores == 0) or not np.any(non_zero_std_mask):
+                    print("Warning: All scores are zero or all std values are zero. Keeping only a few random samples.")
+                    # Just keep a few random samples instead of the whole batch
+                    # Ensure we keep at least num_mini_batches samples per device to avoid division by zero
+                    min_samples_needed = args.num_mini_batches * args.world_size
+                    num_samples_to_keep = max(min_samples_needed, min(args.per_device_train_batch_size * 2, len(scores)))
+                    if num_samples_to_keep > len(scores):
+                        # If we don't have enough samples, take all of them
                         non_zero_gradient_index = np.arange(len(scores))
-                    real_batch_size_ratio = len(non_zero_gradient_index) / len(scores)
+                        num_samples_to_keep = len(scores)
+                    else:
+                        non_zero_gradient_index = np.random.choice(len(scores), size=num_samples_to_keep, replace=False)
+                    real_batch_size_ratio = num_samples_to_keep / len(scores)
+                else:
+                    real_batch_size_ratio = non_zero_std_mask.sum() * args.num_samples_per_prompt_rollout / len(scores)
+                    expanded_mask = np.repeat(non_zero_std_mask, args.num_samples_per_prompt_rollout)
+                    non_zero_gradient_index = np.where(expanded_mask)[0]
+                    
+
+            
+            # Ensure we have enough samples for training
+            min_samples_needed = args.num_mini_batches * args.world_size
+            if len(non_zero_gradient_index) < min_samples_needed:
+                print(f"Warning: After filtering, only {len(non_zero_gradient_index)} samples remain, but need at least {min_samples_needed}.")
+                additional_needed = min_samples_needed - len(non_zero_gradient_index)
+                all_indices = set(range(len(scores)))
+                remaining_indices = list(all_indices - set(non_zero_gradient_index))
+                if len(remaining_indices) >= additional_needed:
+                    additional_indices = np.random.choice(remaining_indices, size=additional_needed, replace=False)
+                    non_zero_gradient_index = np.concatenate([non_zero_gradient_index, additional_indices])
+                else:
+                    # If we still don't have enough, take all available
+                    non_zero_gradient_index = np.arange(len(scores))
+                real_batch_size_ratio = len(non_zero_gradient_index) / len(scores)
+
+
             advantages = advantages[non_zero_gradient_index]
             scores = scores[non_zero_gradient_index]
             responses = [responses[i] for i in non_zero_gradient_index]
@@ -1528,6 +1860,7 @@ def data_preparation_thread(
             "val/tool_runtimes_rate": np.array(tool_runtimes).mean(),
             "val/tool_calleds_rate": np.array(tool_calleds).mean(),
             **reward_metrics,
+            **replay_stats,  # Add replay statistics to metrics
         }
 
         if args.save_traces:
@@ -2294,26 +2627,6 @@ if __name__ == "__main__":
                 np_verifiable_rewards = np.array(verifiable_rewards)
                 metrics["objective/verifiable_reward"] = np_verifiable_rewards.mean()
                 metrics["objective/verifiable_correct_rate"] = (np_verifiable_rewards > 0.0).mean()
-                
-                # Per-dataset verifiable rewards
-                # for ds, indices in dataset_indices.items():
-                #     ds_verifiable_rewards = [verifiable_rewards[i] for i in indices]
-                #     if ds_verifiable_rewards:
-                #         display_name = ds.split('/')[-1]
-                #         ds_np_rewards = np.array(ds_verifiable_rewards)
-                #         metrics[f"objective/{display_name}/verifiable_reward"] = ds_np_rewards.mean()
-                #         metrics[f"objective/{display_name}/verifiable_correct_rate"] = (ds_np_rewards > 0.0).mean()
-                
-                # reshuffle around per_func rewards
-                # per_func_lists = defaultdict(list)
-                # for reward_dict in per_func_rewards:
-                #     for key, value in reward_dict.items():
-                #         per_func_lists[key].append(value)
-                # # log per function rewards
-                # for key, value in per_func_lists.items():
-                #     np_value = np.array(value)
-                #     metrics[f"objective/{key}_reward"] = np_value.mean()
-                #     metrics[f"objective/{key}_correct_rate"] = (np_value > 0.0).mean()
                 
                 # log additional metrics per dataset (e.g., manufactoria all_pass vs pass_rate)
                 for ds, indices in dataset_indices.items():
