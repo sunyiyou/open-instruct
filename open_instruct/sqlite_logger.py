@@ -658,5 +658,5 @@ class SQLiteLogger:
             'total_successful_responses': total_successful,
             'unique_queries_with_success': unique_queries_with_success,
             'avg_successes_per_query': total_successful / max(unique_queries_with_success, 1),
-            'success_ratio': unique_queries_with_success / len(self.queries_db),
+            'success_ratio': unique_queries_with_success / max(len(self.queries_db), 1),
         }

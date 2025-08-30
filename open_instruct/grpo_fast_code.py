@@ -47,6 +47,7 @@ import json
 import os
 import shutil
 import socket
+import subprocess
 import threading
 import time
 import traceback
@@ -119,6 +120,7 @@ from open_instruct.utils import (
     maybe_get_beaker_config,
     maybe_use_ai2_hf_entity,
     maybe_use_ai2_wandb_entity,
+    upload_to_gs_bucket,
     sync_gs_bucket,
 )
 from open_instruct.vllm_utils3 import create_vllm_engines, init_process_group
@@ -417,6 +419,14 @@ class Args:
     """Whether to auto-commit SQLite transactions"""
     sqlite_journal_mode: str = "DELETE"
     """SQLite journal mode (WAL, DELETE, TRUNCATE, MEMORY, OFF)"""
+    sqlite_upload_to_gcs: bool = False
+    """Whether to periodically upload the SQLite DB to a GCS bucket"""
+    sqlite_gcs_bucket_path: Optional[str] = None
+    """Base GCS path, e.g., gs://ai2-llm/post-training/deletable_cache_models/<user>"""
+    sqlite_gcs_upload_freq: int = 200
+    """Upload frequency in training steps"""
+    sqlite_max_concurrent_uploads: int = 1
+    """Max number of concurrent SQLite uploads (0 or 1 recommended)"""
     
     # Experience replay settings
     enable_experience_replay: bool = False
@@ -465,6 +475,9 @@ class Args:
         # Set default SQLite database path if not provided
         if self.enable_sqlite_logging and self.sqlite_db_path is None:
             self.sqlite_db_path = os.path.join(self.output_dir, "training_responses.db")
+        # Validate GCS SQLite upload config
+        if self.sqlite_upload_to_gcs and self.sqlite_gcs_bucket_path is None:
+            raise ValueError("`sqlite_gcs_bucket_path` must be provided when `sqlite_upload_to_gcs` is True")
             
         # Experience replay validation
         if self.enable_experience_replay and not self.enable_sqlite_logging:
@@ -1652,8 +1665,6 @@ def data_preparation_thread(
                         "replay/fresh_scores": np.mean(fresh_scores),
                         "replay/fresh_advantages": np.mean(fresh_advantages),
                     })
-
-
                 
 
         with Timer("📦 [Data Preparation Thread] Filtering sequences"):
@@ -2241,6 +2252,9 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
     packing_thread.start()
     print("======== ✅ data preparation thread starts =========")
 
+    # Track background upload processes to avoid too many concurrent uploads
+    background_upload_procs: List[subprocess.Popen] = []
+
     # Send initial data to both threads
     data_next = train_dataset[next(iter_dataloader)]
     queries_next = data_next[INPUT_IDS_PROMPT_KEY]
@@ -2485,6 +2499,58 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
             except Empty:
                 print("[Main Thread] 🙈 Evaluation responses not received")
 
+            # --------------------------------------------------------------------------------------------
+            # Periodically upload SQLite DB to GCS (non-blocking)
+            if (
+                sqlite_logger is not None
+                and args.enable_sqlite_logging
+                and args.sqlite_upload_to_gcs
+                and args.sqlite_gcs_bucket_path is not None
+                and args.sqlite_gcs_upload_freq > 0
+                and training_step % args.sqlite_gcs_upload_freq == 0
+            ):
+                try:
+                    # Best-effort flush if autocommit is disabled
+                    try:
+                        if not args.sqlite_autocommit:
+                            if hasattr(sqlite_logger, "responses_db") and hasattr(sqlite_logger.responses_db, "commit"):
+                                sqlite_logger.responses_db.commit()
+                            if hasattr(sqlite_logger, "queries_db") and hasattr(sqlite_logger.queries_db, "commit"):
+                                sqlite_logger.queries_db.commit()
+                    except Exception as _flush_err:
+                        print(f"Warning: failed to flush SQLite DB before upload: {_flush_err}")
+
+                    # To avoid locking issues, copy DB to a temp file and upload the copy
+                    temp_db_path = f"{args.sqlite_db_path}.tmp_upload"
+                    try:
+                        shutil.copy2(args.sqlite_db_path, temp_db_path)
+                    except Exception as copy_err:
+                        print(f"Warning: failed to create temp copy for upload: {copy_err}")
+                        temp_db_path = args.sqlite_db_path
+
+                    dest_dir = args.sqlite_gcs_bucket_path
+                    cmd = [
+                        "gsutil",
+                        "-o",
+                        "GSUtil:parallel_composite_upload_threshold=150M",
+                        "cp",
+                        "-r",
+                        temp_db_path,
+                        dest_dir,
+                    ]
+                    print(
+                        f"[Main Thread] ☁️ Spawning background upload of SQLite DB at step {training_step}: {temp_db_path} -> {dest_dir}"
+                    )
+                    # Reap finished uploads
+                    background_upload_procs[:] = [p for p in background_upload_procs if p.poll() is None]
+                    if len(background_upload_procs) < max(1, args.sqlite_max_concurrent_uploads):
+                        proc = subprocess.Popen(cmd, stdout=subprocess.STDOUT, stderr=subprocess.STDOUT)
+                        background_upload_procs.append(proc)
+                    else:
+                        print("[Main Thread] ⏩ Skipping upload to avoid too many concurrent uploads")
+                except Exception as upload_err:
+                    print(f"Warning: GCS upload of SQLite DB failed to start at step {training_step}: {upload_err}")
+
         print(f"Saving final model at step {training_step} to {args.output_dir}")
         with Timer("[Main Thread] 🗡️ Saving model"):
             ray.get([policy_group.models[i].save_model.remote(args.output_dir) for i in range(args.world_size)])
@@ -2531,6 +2597,13 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
     # Close SQLite logger
     if sqlite_logger is not None:
         try:
+            # Wait for background uploads to finish before closing if any
+            try:
+                if 'background_upload_procs' in locals():
+                    for p in background_upload_procs:
+                        p.wait(timeout=30)
+            except Exception as _wait_err:
+                print(f"Warning: could not wait for background uploads to finish: {_wait_err}")
             sqlite_logger.close()
             print("✅ SQLite logger closed")
         except Exception as cleanup_error:
