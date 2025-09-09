@@ -2544,7 +2544,7 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
                     # Reap finished uploads
                     background_upload_procs[:] = [p for p in background_upload_procs if p.poll() is None]
                     if len(background_upload_procs) < max(1, args.sqlite_max_concurrent_uploads):
-                        proc = subprocess.Popen(cmd, stdout=subprocess.STDOUT, stderr=subprocess.STDOUT)
+                        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
                         background_upload_procs.append(proc)
                     else:
                         print("[Main Thread] ⏩ Skipping upload to avoid too many concurrent uploads")
