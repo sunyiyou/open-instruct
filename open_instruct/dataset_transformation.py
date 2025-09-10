@@ -445,6 +445,23 @@ CHAT_TEMPLATES = {
         "{% endif %}"
         "{% endfor %}"
     ),
+    "gpt": (
+        "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2025-08-31\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|>"
+        "{% for message in messages %}"
+        "{% if message['role'] == 'user' %}"
+        "{{ '<|start|>user<|message|>' + message['content'] + '<|end|>' }}"
+        "{% elif message['role'] == 'assistant' %}"
+        "{% if not loop.last %}"
+        "{{ '<|start|>assistant<|message|>'  + message['content'] + '<|end|>' }}"
+        "{% else %}"
+        "{{ '<|start|>assistant<|message|>'  + message['content'] + '<|end|>' }}"
+        "{% endif %}"
+        "{% endif %}"
+        "{% if loop.last and add_generation_prompt %}"
+        "{{ '<|end|><|start|>assistant' }}"
+        "{% endif %}"
+        "{% endfor %}"
+    )
 }
 # flake8: noqa
 
