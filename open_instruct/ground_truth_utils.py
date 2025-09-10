@@ -89,6 +89,13 @@ class ManufactoriaVerifierConfig(VerifierConfig):
 
 
 @dataclass
+class BallsimVerifierConfig(VerifierConfig):
+    ballsim_api_url: str
+    ballsim_max_execution_time: float
+    ballsim_scoring_mode: str = "all_pass"  # "all_pass" or "pass_rate"
+
+
+@dataclass
 class VerificationResult:
     score: float
     cost: float = 0.0
@@ -1014,6 +1021,160 @@ class ManufactoriaVerifier(VerifierFunction):
             type: The VerifierConfig class or its subclass
         """
         return ManufactoriaVerifierConfig
+
+
+class BallsimVerifier(VerifierFunction):
+    """
+    Verifier that executes Python code against test cases using the ballsim API.
+
+    The label should be a list of test cases or a JSON string representation of a list.
+    The API URL should be provided during initialization.
+    """
+
+    def __init__(self, verifier_config: BallsimVerifierConfig) -> None:
+        super().__init__("ballsim", verifier_config=verifier_config, weight=1.0)
+
+    def extract_python_code(self, model_output: str) -> str:
+        """Extract the last code block between ``` markers from the model output."""
+        # Find content between ``` markers
+        pattern = r"```(?:python)?(.*?)```"
+        matches = re.findall(pattern, model_output, re.DOTALL)
+
+        if not matches:
+            return model_output
+
+        # Return the last match, stripped of whitespace
+        return matches[-1].strip()
+
+    async def async_call(
+        self, tokenized_prediction: List[int], prediction: str, label: Any, query: Optional[str] = None
+    ) -> VerificationResult:
+        """
+        Asynchronously verify code execution against test cases using ballsim API.
+
+        Args:
+            tokenized_prediction: Unused tokenized representation
+            prediction: The model output containing Python code
+            label: List of test cases or JSON string representation of a list
+            query: Unused original query
+
+        Returns:
+            VerificationResult with score as the pass rate of test cases
+        """
+        # Parse label to get test cases
+        if isinstance(label, str):
+            try:
+                tests = json.loads(label)
+            except json.JSONDecodeError:
+                logger.warning(f"Failed to parse label as JSON: {label}")
+                return VerificationResult(score=0.0)
+        else:
+            tests = label
+
+        if not isinstance(tests, list):
+            logger.warning(f"Label must be a list of test cases, got: {type(tests)}")
+            return VerificationResult(score=0.0)
+
+        if not tests:
+            logger.warning("No test cases provided")
+            return VerificationResult(score=0.0)
+
+        # Extract Python code from the model output
+        python_code = self.extract_python_code(prediction)
+
+        # Determine which API endpoint to use based on test format
+        # Check if tests have 'input'/'output' format (stdio) or are assertion strings
+        if tests and isinstance(tests[0], dict) and 'input' in tests[0] and 'output' in tests[0]:
+            # Use stdio format
+            api_endpoint = "/test_program_stdio"
+        else:
+            # Use assertion format
+            api_endpoint = "/test_program"
+
+        # Test data
+        payload = {
+            "program": python_code,
+            "tests": tests,
+            "max_execution_time": self.verifier_config.ballsim_max_execution_time,
+        }
+
+        try:
+            # Make the request in a thread pool to keep it async
+            def make_request():
+                full_url = self.verifier_config.ballsim_api_url.rstrip('/') + api_endpoint
+                response = requests.post(
+                    full_url, json=payload, headers={"Content-Type": "application/json"}
+                )
+                response.raise_for_status()
+                return response.json()
+
+            result = await asyncio.to_thread(make_request)
+            passes = result["results"]
+            pass_rate_score = sum(passes) / len(passes) if passes else 0.0
+            all_pass_score = 1.0 if pass_rate_score == 1.0 else 0.0
+            
+            # Choose the score based on the configured mode
+            scoring_mode = getattr(self.verifier_config, 'ballsim_scoring_mode', 'all_pass')
+            if scoring_mode == "pass_rate":
+                final_score = pass_rate_score
+            else:  # default to "all_pass"
+                final_score = all_pass_score
+            
+            # Collect reasoning information
+            reasoning_parts = []
+            reasoning_parts.append(f"Scoring mode: {scoring_mode}")
+            reasoning_parts.append(f"Pass rate: {sum(passes)}/{len(passes)} ({pass_rate_score:.3f})")
+            reasoning_parts.append(f"All passed: {all_pass_score == 1.0}")
+            reasoning_parts.append(f"Final score ({scoring_mode}): {final_score:.3f}")
+            
+            reasoning = "; ".join(reasoning_parts)
+            additional_metrics = {
+                "all_pass": all_pass_score,
+                "pass_rate": pass_rate_score
+            }
+            return VerificationResult(score=final_score, reasoning=reasoning, additional_metrics=additional_metrics)
+        except Exception as e:
+            logger.warning(f"Error verifying ballsim code sample: {e}")
+            return VerificationResult(score=0.0)
+
+    def __call__(
+        self, tokenized_prediction: List[int], prediction: str, label: Any, query: Optional[str] = None
+    ) -> VerificationResult:
+        """
+        Synchronously verify code execution against test cases.
+        """
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                raise RuntimeError(
+                    "Cannot call synchronous __call__ method from within an async context. Use async_call instead."
+                )
+            else:
+                return asyncio.run(self.async_call(tokenized_prediction, prediction, label, query))
+        except RuntimeError as e:
+            # Check if this is due to interpreter shutdown
+            if "cannot schedule new futures after interpreter shutdown" in str(e):
+                logger.warning("Skipping ballsim verification due to interpreter shutdown")
+                return VerificationResult(score=0.0, reasoning="Verification skipped due to shutdown")
+            # For other RuntimeErrors, try asyncio.run as before
+            try:
+                return asyncio.run(self.async_call(tokenized_prediction, prediction, label, query))
+            except Exception as nested_e:
+                logger.warning(f"Error verifying ballsim sample during shutdown: {nested_e}")
+                return VerificationResult(score=0.0, reasoning=f"Verification failed: {nested_e}")
+        except Exception as e:
+            logger.warning(f"Error verifying ballsim sample: {e}")
+            return VerificationResult(score=0.0, reasoning=f"Verification failed: {e}")
+
+    @classmethod
+    def get_config_class(cls) -> type:
+        """
+        Return the configuration class for this verifier.
+
+        Returns:
+            type: The VerifierConfig class or its subclass
+        """
+        return BallsimVerifierConfig
 
 
 def build_all_verifiers(args) -> Dict[str, VerifierFunction]:

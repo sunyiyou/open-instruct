@@ -131,6 +131,16 @@ class EvalArgs:
     """API URL for Manufactoria verification"""
     manufactoria_max_execution_time: float = 1.0
     """Maximum execution time for Manufactoria verification"""
+    ballsim_api_url: Optional[str] = None
+    """API URL for Ballsim verification"""
+    ballsim_max_execution_time: float = 1.0
+    """Maximum execution time for Ballsim verification"""
+    ballsim_scoring_mode: str = "all_pass"
+    """Ballsim scoring mode: 'all_pass' or 'pass_rate'"""
+    
+    # Problem family configuration
+    problem_family: str = "manufactoria"
+    """Problem family to evaluate: 'manufactoria' or 'ballsim'"""
     
     # LLM judge configuration
     llm_judge_model: str = "azure/gpt-4o-mini-standard"
@@ -552,8 +562,8 @@ class CodeEvaluator:
                 # List of known CSV columns to load as metrics (excluding avg_sequence_length since it's already handled above)
                 metrics_columns = [
                     "avg_score",
-                    "manufactoria_all_pass", 
-                    "manufactoria_pass_rate",
+                    "all_pass",
+                    "pass_rate",
                     "avg_tool_calls",
                     "tool_timeout_rate",
                     "tool_error_rate",
@@ -922,37 +932,39 @@ class CodeEvaluator:
         
         # Add per-sample additional metrics if available
         if detailed.get("additional_metrics") is not None:
-            # Extract manufactoria metrics per sample
-            manufactoria_all_pass = []
-            manufactoria_pass_rate = []
+            # Extract verification metrics per sample
+            all_pass_values = []
+            pass_rate_values = []
             
             for i, sample_metrics in enumerate(detailed["additional_metrics"]):
                 if sample_metrics:
-                    # Extract manufactoria metrics (the keys are prefixed with dataset name)
+                    # Extract metrics - use generic names from additional_metrics
                     all_pass = None
                     pass_rate = None
                     
                     for key, value in sample_metrics.items():
-                        if key.endswith("_all_pass"):
+                        if key == "all_pass":
                             all_pass = value
-                        elif key.endswith("_pass_rate"):
+                        elif key == "pass_rate":
                             pass_rate = value
                     
-                    manufactoria_all_pass.append(all_pass)
-                    manufactoria_pass_rate.append(pass_rate)
+                    all_pass_values.append(all_pass)
+                    pass_rate_values.append(pass_rate)
                 else:
-                    manufactoria_all_pass.append(None)
-                    manufactoria_pass_rate.append(None)
+                    all_pass_values.append(None)
+                    pass_rate_values.append(None)
             
             # Add the per-sample metrics to the DataFrame
-            df_data["manufactoria_all_pass"] = manufactoria_all_pass
-            df_data["manufactoria_pass_rate"] = manufactoria_pass_rate
+            df_data["all_pass"] = all_pass_values
+            df_data["pass_rate"] = pass_rate_values
         else:
             # Fallback to global metrics if per-sample metrics are not available
-            available_metrics = ["manufactoria_all_pass", "manufactoria_pass_rate"]
+            available_metrics = ["all_pass", "pass_rate"]
             for metric in available_metrics:
                 if metric in run_metrics:
                     df_data[metric] = [run_metrics[metric]] * len(detailed["responses"])
+                else:
+                    df_data[metric] = [0.0] * len(detailed["responses"])
         
         df = pd.DataFrame(df_data)
         csv_path = os.path.join(output_dir, f"run_{run_id}_detailed.csv")
@@ -971,8 +983,8 @@ class CodeEvaluator:
                 "tool_timeout_rate": dataset_df["tool_timeout"].mean(),
                 "tool_error_rate": dataset_df["tool_error"].mean(),
                 "avg_sequence_length": dataset_df["sequence_length"].mean(),
-                "manufactoria_all_pass": dataset_df["manufactoria_all_pass"].mean(),
-                "manufactoria_pass_rate": dataset_df["manufactoria_pass_rate"].mean(),
+                "all_pass": dataset_df.get("all_pass", pd.Series([0])).mean() if "all_pass" in dataset_df.columns else 0.0,
+                "pass_rate": dataset_df.get("pass_rate", pd.Series([0])).mean() if "pass_rate" in dataset_df.columns else 0.0,
             }
             
             dataset_summary.append(summary_row)
@@ -988,8 +1000,8 @@ class CodeEvaluator:
             "tool_timeout_rate": df["tool_timeout"].mean(),
             "tool_error_rate": df["tool_error"].mean(),
             "avg_sequence_length": df["sequence_length"].mean(),
-            "manufactoria_all_pass": df["manufactoria_all_pass"].mean(),
-            "manufactoria_pass_rate": df["manufactoria_pass_rate"].mean(),
+            "all_pass": df.get("all_pass", pd.Series([0])).mean() if "all_pass" in df.columns else 0.0,
+            "pass_rate": df.get("pass_rate", pd.Series([0])).mean() if "pass_rate" in df.columns else 0.0,
         }
         
         summary_df = pd.concat([summary_df, pd.DataFrame([overall_summary])], ignore_index=True)
@@ -1165,16 +1177,16 @@ def print_results_summary(results: Dict):
             print(f"    Mean: {stats['mean']:.4f} ± {stats['std']:.4f}")
             print(f"    Range: [{stats['min']:.4f}, {stats['max']:.4f}]")
     
-    # Show Manufactoria-specific metrics if available
-    manufactoria_metrics = ["manufactoria_all_pass", "manufactoria_pass_rate"]
-    manufactoria_found = False
-    for metric in manufactoria_metrics:
+    # Show verification metrics if available
+    verification_metrics = ["all_pass", "pass_rate"]
+    verification_found = False
+    for metric in verification_metrics:
         if metric in results["metrics"]:
-            if not manufactoria_found:
-                print("\n🏭 MANUFACTORIA METRICS:")
-                manufactoria_found = True
+            if not verification_found:
+                print("\n🔍 VERIFICATION METRICS:")
+                verification_found = True
             stats = results["metrics"][metric]
-            display_name = metric.replace("manufactoria_", "").replace("_", " ").title()
+            display_name = metric.replace("_", " ").title()
             print(f"  {display_name}:")
             print(f"    Mean: {stats['mean']:.4f} ± {stats['std']:.4f}")
             print(f"    Range: [{stats['min']:.4f}, {stats['max']:.4f}]")
@@ -1199,12 +1211,12 @@ def print_results_summary(results: Dict):
             stats = results["metrics"][reward_metric]
             print(f"    Average Score: {stats['mean']:.4f} ± {stats['std']:.4f}")
         
-        # Show Manufactoria-specific metrics if available
-        for manufactoria_metric in ["manufactoria_all_pass", "manufactoria_pass_rate"]:
-            full_metric = f"{dataset_name}/{manufactoria_metric}"
+        # Show verification metrics if available
+        for verification_metric in ["all_pass", "pass_rate"]:
+            full_metric = f"{dataset_name}/{verification_metric}"
             if full_metric in results["metrics"]:
                 stats = results["metrics"][full_metric]
-                display_name = manufactoria_metric.replace("manufactoria_", "").replace("_", " ").title()
+                display_name = verification_metric.replace("_", " ").title()
                 print(f"    {display_name}: {stats['mean']:.4f} ± {stats['std']:.4f}")
     
     print("="*60)
@@ -1242,11 +1254,11 @@ def print_combined_results_summary(results: Dict):
                 reward_stats = dataset_results["metrics"]["avg_score"]
                 print(f"    Average Score: {reward_stats['mean']:.4f} ± {reward_stats['std']:.4f}")
             
-            # Show Manufactoria-specific metrics if available
-            for manufactoria_metric in ["manufactoria_all_pass", "manufactoria_pass_rate"]:
-                if manufactoria_metric in dataset_results["metrics"]:
-                    stats = dataset_results["metrics"][manufactoria_metric]
-                    display_name = manufactoria_metric.replace("manufactoria_", "").replace("_", " ").title()
+            # Show verification metrics if available
+            for verification_metric in ["all_pass", "pass_rate"]:
+                if verification_metric in dataset_results["metrics"]:
+                    stats = dataset_results["metrics"][verification_metric]
+                    display_name = verification_metric.replace("_", " ").title()
                     print(f"    {display_name}: {stats['mean']:.4f} ± {stats['std']:.4f}")
     
     print("="*80)
