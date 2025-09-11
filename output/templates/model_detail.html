@@ -119,8 +119,8 @@
                             {% set metrics = dataset.aggregated_metrics.metrics if dataset.aggregated_metrics else {} %}
                             {% set avg_score = metrics.get('avg_score', {}) %}
                             {% set avg_sequence_length = metrics.get('avg_sequence_length', {}) %}
-                            {% set manufactoria_all_pass = metrics.get('manufactoria_all_pass', {}) %}
-                            {% set manufactoria_pass_rate = metrics.get('manufactoria_pass_rate', {}) %}
+                            {% set all_pass = metrics.get('all_pass', {}) %}
+                            {% set pass_rate = metrics.get('pass_rate', {}) %}
                             <tr>
                                 <td>
                                     <div class="d-flex align-items-center">
@@ -165,18 +165,18 @@
                                     {% endif %}
                                 </td>
                                 <td class="text-center">
-                                    {% if manufactoria_all_pass %}
-                                    <span class="{% if manufactoria_all_pass.mean >= 0.8 %}score-excellent{% elif manufactoria_all_pass.mean >= 0.6 %}score-good{% elif manufactoria_all_pass.mean >= 0.4 %}score-fair{% elif manufactoria_all_pass.mean >= 0.2 %}score-poor{% else %}score-bad{% endif %}">
-                                        {{ manufactoria_all_pass.mean | round_float(3) }}
+                                    {% if all_pass %}
+                                    <span class="{% if all_pass.mean >= 0.8 %}score-excellent{% elif all_pass.mean >= 0.6 %}score-good{% elif all_pass.mean >= 0.4 %}score-fair{% elif all_pass.mean >= 0.2 %}score-poor{% else %}score-bad{% endif %}">
+                                        {{ all_pass.mean | round_float(3) }}
                                     </span>
                                     {% else %}
                                     <span class="text-muted">N/A</span>
                                     {% endif %}
                                 </td>
                                 <td class="text-center">
-                                    {% if manufactoria_pass_rate %}
-                                    <span class="{% if manufactoria_pass_rate.mean >= 0.8 %}score-excellent{% elif manufactoria_pass_rate.mean >= 0.6 %}score-good{% elif manufactoria_pass_rate.mean >= 0.4 %}score-fair{% elif manufactoria_pass_rate.mean >= 0.2 %}score-poor{% else %}score-bad{% endif %}">
-                                        {{ manufactoria_pass_rate.mean | round_float(3) }}
+                                    {% if pass_rate %}
+                                    <span class="{% if pass_rate.mean >= 0.8 %}score-excellent{% elif pass_rate.mean >= 0.6 %}score-good{% elif pass_rate.mean >= 0.4 %}score-fair{% elif pass_rate.mean >= 0.2 %}score-poor{% else %}score-bad{% endif %}">
+                                        {{ pass_rate.mean | round_float(3) }}
                                     </span>
                                     {% else %}
                                     <span class="text-muted">N/A</span>
@@ -301,19 +301,19 @@ const scoreStds = [
     {% endfor %}
 ];
 
-const manufactoriaAllPass = [
+const allPassData = [
     {% for dataset in datasets %}
     {% set metrics = dataset.aggregated_metrics.metrics if dataset.aggregated_metrics else {} %}
-    {% set manufactoria_all_pass = metrics.get('manufactoria_all_pass', {}) %}
-    {{ manufactoria_all_pass.mean if manufactoria_all_pass else 0 }}{% if not loop.last %},{% endif %}
+    {% set all_pass = metrics.get('all_pass', {}) %}
+    {{ all_pass.mean if all_pass else 0 }}{% if not loop.last %},{% endif %}
     {% endfor %}
 ];
 
-const manufactoriaPassRate = [
+const passRateData = [
     {% for dataset in datasets %}
     {% set metrics = dataset.aggregated_metrics.metrics if dataset.aggregated_metrics else {} %}
-    {% set manufactoria_pass_rate = metrics.get('manufactoria_pass_rate', {}) %}
-    {{ manufactoria_pass_rate.mean if manufactoria_pass_rate else 0 }}{% if not loop.last %},{% endif %}
+    {% set pass_rate = metrics.get('pass_rate', {}) %}
+    {{ pass_rate.mean if pass_rate else 0 }}{% if not loop.last %},{% endif %}
     {% endfor %}
 ];
 
@@ -418,13 +418,13 @@ new Chart(manufactoriaCtx, {
         labels: datasetNames,
         datasets: [{
             label: 'All Pass Rate',
-            data: manufactoriaAllPass,
+            data: allPassData,
             backgroundColor: 'rgba(75, 192, 192, 0.8)',
             borderColor: 'rgba(75, 192, 192, 1)',
             borderWidth: 1
         }, {
             label: 'Pass Rate',
-            data: manufactoriaPassRate,
+            data: passRateData,
             backgroundColor: 'rgba(153, 102, 255, 0.8)',
             borderColor: 'rgba(153, 102, 255, 1)',
             borderWidth: 1

@@ -22,6 +22,36 @@ class DataLoader:
     """Utility class for loading evaluation results data"""
     
     @staticmethod
+    def normalize_metric_names(row_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Normalize metric names to support both old and new naming conventions.
+        Maps old naming (manufactoria_*, ballsim_*) to new generic names (all_pass, pass_rate).
+        """
+        normalized = row_dict.copy()
+        
+        # Handle all_pass metric
+        if "all_pass" not in normalized:
+            # Try to find old-style all_pass metrics
+            if "manufactoria_all_pass" in normalized:
+                normalized["all_pass"] = normalized["manufactoria_all_pass"]
+            elif "ballsim_all_pass" in normalized:
+                normalized["all_pass"] = normalized["ballsim_all_pass"]
+            else:
+                normalized["all_pass"] = 0.0
+        
+        # Handle pass_rate metric
+        if "pass_rate" not in normalized:
+            # Try to find old-style pass_rate metrics
+            if "manufactoria_pass_rate" in normalized:
+                normalized["pass_rate"] = normalized["manufactoria_pass_rate"]
+            elif "ballsim_pass_rate" in normalized:
+                normalized["pass_rate"] = normalized["ballsim_pass_rate"]
+            else:
+                normalized["pass_rate"] = 0.0
+        
+        return normalized
+    
+    @staticmethod
     def get_all_models() -> List[Dict[str, Any]]:
         """Get list of all models with their basic info"""
         models = []
@@ -91,6 +121,21 @@ class DataLoader:
         if aggregated_file.exists():
             with open(aggregated_file, 'r') as f:
                 aggregated_metrics = json.load(f)
+                
+                # Normalize metric names in aggregated metrics
+                if aggregated_metrics and "metrics" in aggregated_metrics:
+                    normalized_metrics = {}
+                    for metric_name, metric_data in aggregated_metrics["metrics"].items():
+                        # Handle old-style metric names
+                        if metric_name in ["manufactoria_all_pass", "ballsim_all_pass"]:
+                            normalized_metrics["all_pass"] = metric_data
+                        elif metric_name in ["manufactoria_pass_rate", "ballsim_pass_rate"]:
+                            normalized_metrics["pass_rate"] = metric_data
+                        else:
+                            normalized_metrics[metric_name] = metric_data
+                    
+                    # Update the aggregated metrics with normalized names
+                    aggregated_metrics["metrics"].update(normalized_metrics)
         
         # Get individual runs
         runs = []
@@ -101,9 +146,12 @@ class DataLoader:
             summary_df = pd.read_csv(file)
             overall_row = summary_df[summary_df["dataset"] == "OVERALL"].iloc[0]
             
+            # Normalize metric names for backward compatibility
+            normalized_summary = DataLoader.normalize_metric_names(overall_row.to_dict())
+            
             runs.append({
                 "run_id": run_id,
-                "summary": overall_row.to_dict(),
+                "summary": normalized_summary,
                 "has_detailed": (dataset_dir / f"run_{run_id}_detailed.csv").exists()
             })
         
@@ -158,24 +206,28 @@ class DataLoader:
                             "total_runs": 0
                         }
                     
+                    # Normalize metric names for backward compatibility
+                    normalized_row = DataLoader.normalize_metric_names(row.to_dict())
+                    
                     # Add this run's result
                     sample_results[sample_id]["runs"][run_id] = {
                         "run_id": run_id,
-                        "prompt": row.get("prompt", ""),
-                        "response": row.get("response", ""),
-                        "ground_truth": row.get("ground_truth", ""),
-                        "score": row.get("score", 0),
-                        "manufactoria_pass_rate": row.get("manufactoria_pass_rate", 0),
-                        "finish_reason": row.get("finish_reason", ""),
-                        "failure_reason": row.get("failure_reason", "none"),
-                        "dataset_source": row.get("dataset_source", ""),
-                        "sequence_length": row.get("sequence_length", 0),
-                        "num_tool_calls": row.get("num_tool_calls", 0),
-                        "tool_timeout": row.get("tool_timeout", False),
-                        "tool_error": row.get("tool_error", False),
-                        "tool_output": row.get("tool_output", ""),
-                        "tool_runtime": row.get("tool_runtime", 0.0),
-                        "tool_called": row.get("tool_called", False),
+                        "prompt": normalized_row.get("prompt", ""),
+                        "response": normalized_row.get("response", ""),
+                        "ground_truth": normalized_row.get("ground_truth", ""),
+                        "score": normalized_row.get("score", 0),
+                        "all_pass": normalized_row.get("all_pass", 0),
+                        "pass_rate": normalized_row.get("pass_rate", 0),
+                        "finish_reason": normalized_row.get("finish_reason", ""),
+                        "failure_reason": normalized_row.get("failure_reason", "none"),
+                        "dataset_source": normalized_row.get("dataset_source", ""),
+                        "sequence_length": normalized_row.get("sequence_length", 0),
+                        "num_tool_calls": normalized_row.get("num_tool_calls", 0),
+                        "tool_timeout": normalized_row.get("tool_timeout", False),
+                        "tool_error": normalized_row.get("tool_error", False),
+                        "tool_output": normalized_row.get("tool_output", ""),
+                        "tool_runtime": normalized_row.get("tool_runtime", 0.0),
+                        "tool_called": normalized_row.get("tool_called", False),
                     }
                     
             except (ValueError, IndexError, Exception) as e:
@@ -190,7 +242,8 @@ class DataLoader:
                 continue
                 
             scores = [run["score"] for run in runs]
-            pass_rates = [run["manufactoria_pass_rate"] for run in runs]
+            pass_rates = [run["pass_rate"] for run in runs]
+            all_pass_values = [run["all_pass"] for run in runs]
             seq_lengths = [run["sequence_length"] for run in runs]
             tool_runtimes = [run["tool_runtime"] for run in runs]
             sample_data.update({
@@ -199,8 +252,10 @@ class DataLoader:
                 "worst_score": min(scores),
                 "avg_score": np.mean(scores),
                 "avg_pass_rate": np.mean(pass_rates),
+                "avg_all_pass": np.mean(all_pass_values),
                 "score_std": np.std(scores) if len(scores) > 1 else 0,
                 "pass_rate_std": np.std(pass_rates) if len(pass_rates) > 1 else 0,
+                "all_pass_std": np.std(all_pass_values) if len(all_pass_values) > 1 else 0,
                 "success_rate": sum(1 for score in scores if score > 0) / len(scores),
                 "avg_sequence_length": np.mean(seq_lengths),
                 "min_sequence_length": min(seq_lengths),

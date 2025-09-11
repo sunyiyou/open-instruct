@@ -29,8 +29,8 @@
 {% set metrics = dataset_info.aggregated_metrics.metrics if dataset_info.aggregated_metrics else {} %}
 {% set avg_score = metrics.get('avg_score', {}) %}
 {% set avg_sequence_length = metrics.get('avg_sequence_length', {}) %}
-{% set manufactoria_all_pass = metrics.get('manufactoria_all_pass', {}) %}
-{% set manufactoria_pass_rate = metrics.get('manufactoria_pass_rate', {}) %}
+{% set all_pass = metrics.get('all_pass', {}) %}
+{% set pass_rate = metrics.get('pass_rate', {}) %}
 {% set stop_rate = dataset_info.aggregated_metrics.stop_rate if dataset_info.aggregated_metrics else {} %}
 
 <div class="row mb-5">
@@ -80,8 +80,8 @@
         <div class="card card-metric text-center">
             <div class="card-body">
                 <div class="metric-value">
-                    {% if manufactoria_all_pass %}
-                    {{ manufactoria_all_pass.mean | round_float(3) }}
+                    {% if all_pass %}
+                    {{ all_pass.mean | round_float(3) }}
                     {% else %}
                     N/A
                     {% endif %}
@@ -96,8 +96,8 @@
         <div class="card card-metric text-center">
             <div class="card-body">
                 <div class="metric-value">
-                    {% if manufactoria_pass_rate %}
-                    {{ manufactoria_pass_rate.mean | round_float(3) }}
+                    {% if pass_rate %}
+                    {{ pass_rate.mean | round_float(3) }}
                     {% else %}
                     N/A
                     {% endif %}
@@ -160,13 +160,13 @@
                         {% endif %}
                     </div>
                     <div class="col-md-4">
-                        {% if manufactoria_all_pass and manufactoria_pass_rate %}
-                        <h6>Manufactoria Metrics</h6>
+                        {% if all_pass and pass_rate %}
+                        <h6>Verification Metrics</h6>
                         <ul class="list-unstyled">
-                            <li><strong>All Pass Mean:</strong> {{ manufactoria_all_pass.mean | round_float(4) }} ({{ manufactoria_all_pass.mean | percentage }})</li>
-                            <li><strong>Pass Rate Mean:</strong> {{ manufactoria_pass_rate.mean | round_float(4) }} ({{ manufactoria_pass_rate.mean | percentage }})</li>
-                            <li><strong>All Pass Std:</strong> {{ manufactoria_all_pass.std | round_float(4) }}</li>
-                            <li><strong>Pass Rate Std:</strong> {{ manufactoria_pass_rate.std | round_float(4) }}</li>
+                            <li><strong>All Pass Mean:</strong> {{ all_pass.mean | round_float(4) }} ({{ all_pass.mean | percentage }})</li>
+                            <li><strong>Pass Rate Mean:</strong> {{ pass_rate.mean | round_float(4) }} ({{ pass_rate.mean | percentage }})</li>
+                            <li><strong>All Pass Std:</strong> {{ all_pass.std | round_float(4) }}</li>
+                            <li><strong>Pass Rate Std:</strong> {{ pass_rate.std | round_float(4) }}</li>
                         </ul>
                         {% endif %}
                     </div>
