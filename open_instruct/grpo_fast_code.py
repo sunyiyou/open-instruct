@@ -292,6 +292,16 @@ class Args:
     manufactoria_scoring_mode: str = "all_pass"
     """the scoring mode for manufactoria verifier: 'all_pass' (binary) or 'pass_rate' (gradual)"""
 
+
+    # -- ballsim verifier
+    ballsim_api_url: str = os.environ.get("BALLSIM_API_URL", "http://localhost:2345") + "/test_program"
+    """the api url to use for the ballsim verifier"""
+    ballsim_max_execution_time: float = 1.0
+    """the max execution time to use for the ballsim verifier"""
+    ballsim_scoring_mode: str = "all_pass"
+    """the scoring mode for ballsim verifier: 'all_pass' (binary) or 'pass_rate' (gradual)"""
+
+
     # -- non stop penalty
     non_stop_penalty: bool = False
     """whether to penalize responses which did not finish generation"""
@@ -2355,7 +2365,9 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig, reward_fn: 
                         scalar_metrics[key] = value
                     if isinstance(value, np.ndarray) or isinstance(value, list):
                         if len(value) > 0:
-                            writer.add_histogram(key, value, episode)
+                            # Convert lists to numpy arrays for TensorBoard compatibility
+                            hist_value = np.array(value) if isinstance(value, list) else value
+                            writer.add_histogram(key, hist_value, episode)
                 print_rich_single_line_metrics(scalar_metrics)
 
                 if args.save_freq > 0 and training_step % args.save_freq == 0:

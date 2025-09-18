@@ -1082,15 +1082,6 @@ class BallsimVerifier(VerifierFunction):
         # Extract Python code from the model output
         python_code = self.extract_python_code(prediction)
 
-        # Determine which API endpoint to use based on test format
-        # Check if tests have 'input'/'output' format (stdio) or are assertion strings
-        if tests and isinstance(tests[0], dict) and 'input' in tests[0] and 'output' in tests[0]:
-            # Use stdio format
-            api_endpoint = "/test_program_stdio"
-        else:
-            # Use assertion format
-            api_endpoint = "/test_program"
-
         # Test data
         payload = {
             "program": python_code,
@@ -1099,11 +1090,10 @@ class BallsimVerifier(VerifierFunction):
         }
 
         try:
-            # Make the request in a thread pool to keep it async
+            
             def make_request():
-                full_url = self.verifier_config.ballsim_api_url.rstrip('/') + api_endpoint
                 response = requests.post(
-                    full_url, json=payload, headers={"Content-Type": "application/json"}
+                    self.verifier_config.ballsim_api_url, json=payload, headers={"Content-Type": "application/json"}
                 )
                 response.raise_for_status()
                 return response.json()

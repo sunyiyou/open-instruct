@@ -17,6 +17,7 @@ from inspect_db import DatabaseInspector
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key-here'  # Change this in production
+os.environ["DB_PATH"] = "../output/dbs/Qwen3_4B_Instruct_ballsim_G.db"  # Default DB path
 
 # Add custom Jinja2 filters
 @app.template_filter('number_format')

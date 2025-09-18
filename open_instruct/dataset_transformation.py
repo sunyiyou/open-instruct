@@ -1229,8 +1229,21 @@ class DatasetTransformationCache:
             dataset = get_dataset_v1(dc, tc)
             transformed_datasets.append(dataset)
 
+        # Handle schema mismatches by removing problematic columns
+        standardized_datasets = []
+        for dataset in transformed_datasets:
+            # Remove scene_config column if it exists to avoid schema conflicts
+            columns_to_remove = []
+            if 'scene_config' in dataset.column_names:
+                columns_to_remove.append('scene_config')
+            
+            if columns_to_remove:
+                dataset = dataset.remove_columns(columns_to_remove)
+            
+            standardized_datasets.append(dataset)
+
         # Combine datasets
-        combined_dataset = concatenate_datasets(transformed_datasets)
+        combined_dataset = concatenate_datasets(standardized_datasets)
         if dataset_skip_cache:
             return combined_dataset
 
@@ -1318,8 +1331,21 @@ class LocalDatasetTransformationCache:
             dataset = get_dataset_v1(dc, tc)
             transformed_datasets.append(dataset)
 
+        # Handle schema mismatches by removing problematic columns
+        standardized_datasets = []
+        for dataset in transformed_datasets:
+            # Remove scene_config column if it exists to avoid schema conflicts
+            columns_to_remove = []
+            if 'scene_config' in dataset.column_names:
+                columns_to_remove.append('scene_config')
+            
+            if columns_to_remove:
+                dataset = dataset.remove_columns(columns_to_remove)
+            
+            standardized_datasets.append(dataset)
+
         # Combine datasets
-        combined_dataset = concatenate_datasets(transformed_datasets)
+        combined_dataset = concatenate_datasets(standardized_datasets)
         if dataset_skip_cache:
             return combined_dataset
 

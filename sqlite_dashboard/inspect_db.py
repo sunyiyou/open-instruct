@@ -220,7 +220,7 @@ class DatabaseInspector:
 
 def main():
     parser = argparse.ArgumentParser(description='Inspect SQLite database contents')
-    parser.add_argument('--db', '-d', default='sqlite_dashboard/training_responses.db', 
+    parser.add_argument('--db', '-d', default='../output/dbs/Qwen3_4B_Instruct_ballsim_G.db', 
                        help='Path to database file (default: training_responses.db)')
     parser.add_argument('--stats', action='store_true', 
                        help='Show database statistics')
