@@ -283,6 +283,8 @@ class Args:
     """the api url to use for the code verifier"""
     code_max_execution_time: float = 1.0
     """the max execution time to use for the code verifier"""
+    code_scoring_mode: str = "all_pass"
+    """the scoring mode for code verifier: 'all_pass' (binary) or 'pass_rate' (gradual)"""
 
     # -- manufactoria verifier
     manufactoria_api_url: str = os.environ.get("MANUFACTORIA_API_URL", "http://localhost:1235") + "/test_solution"

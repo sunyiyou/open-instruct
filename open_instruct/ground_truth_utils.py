@@ -79,6 +79,7 @@ class LMJudgeVerifierConfig(VerifierConfig):
 class CodeVerifierConfig(VerifierConfig):
     code_api_url: str
     code_max_execution_time: float
+    code_scoring_mode: str = "all_pass"  # "all_pass" or "pass_rate"
 
 
 @dataclass
@@ -756,11 +757,33 @@ class CodeVerifier(VerifierFunction):
 
             result = await asyncio.to_thread(make_request)
             passes = result["results"]
-            pass_rate = sum(passes) / len(passes) if passes else 0.0
-            return VerificationResult(score=pass_rate)
+            pass_rate_score = sum(passes) / len(passes) if passes else 0.0
+            all_pass_score = 1.0 if pass_rate_score == 1.0 else 0.0
+            
+            # Choose the score based on the configured mode
+            scoring_mode = getattr(self.verifier_config, 'code_scoring_mode', 'all_pass')
+            if scoring_mode == "pass_rate":
+                final_score = pass_rate_score
+            else:  # default to "all_pass"
+                final_score = all_pass_score
+            
+            # Collect reasoning information
+            reasoning_parts = []
+            reasoning_parts.append(f"Scoring mode: {scoring_mode}")
+            reasoning_parts.append(f"Pass rate: {sum(passes)}/{len(passes)} ({pass_rate_score:.3f})")
+            reasoning_parts.append(f"All passed: {all_pass_score == 1.0}")
+            reasoning_parts.append(f"Final score ({scoring_mode}): {final_score:.3f}")
+            
+            reasoning = "; ".join(reasoning_parts)
+            additional_metrics = {
+                "all_pass": all_pass_score,
+                "pass_rate": pass_rate_score
+            }
+            return VerificationResult(score=final_score, reasoning=reasoning, additional_metrics=additional_metrics)
         except Exception as e:
-            logger.warning(f"Error verifying code sample: {e}")
-            return VerificationResult(score=0.0)
+            error_msg = f"Error verifying code sample: {e}"
+            logger.warning(error_msg)
+            return VerificationResult(score=0.0, reasoning=error_msg)
 
     def __call__(
         self, tokenized_prediction: List[int], prediction: str, label: Any, query: Optional[str] = None
