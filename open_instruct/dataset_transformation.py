@@ -1237,6 +1237,9 @@ class DatasetTransformationCache:
             if 'scene_config' in dataset.column_names:
                 columns_to_remove.append('scene_config')
             
+            if 'meta' in dataset.column_names:
+                columns_to_remove.append('scene_config')
+            
             if columns_to_remove:
                 dataset = dataset.remove_columns(columns_to_remove)
             
