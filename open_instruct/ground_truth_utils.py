@@ -5,6 +5,7 @@ Add new verifiers by subclassing VerifierFunction and implementing the __call__ 
 They are then automatically added to the REWARD_FN_MAPPING.
 """
 
+import ast
 import asyncio
 import json
 import logging
@@ -94,6 +95,11 @@ class BallsimVerifierConfig(VerifierConfig):
     ballsim_api_url: str
     ballsim_max_execution_time: float
     ballsim_scoring_mode: str = "all_pass"  # "all_pass" or "pass_rate"
+
+
+@dataclass
+class FinegrainedVerifierConfig(VerifierConfig):
+    finegrained_scoring_mode: str = "set_overlap"  # "set_overlap" or "ordered_overlap"
 
 
 @dataclass
@@ -745,7 +751,7 @@ class CodeVerifier(VerifierFunction):
             "tests": tests,
             "max_execution_time": self.verifier_config.code_max_execution_time,
         }
-
+        
         try:
             # Make the request in a thread pool to keep it async
             def make_request():
@@ -1188,6 +1194,109 @@ class BallsimVerifier(VerifierFunction):
             type: The VerifierConfig class or its subclass
         """
         return BallsimVerifierConfig
+
+
+class FinegrainedVerifier(VerifierFunction):
+    """
+    Verifier that parses a Python-like list from the prediction and compares it to the ground truth list.
+
+    Modes:
+    1. set_overlap: percentage of unique elements in prediction that are in ground truth.
+       (Note: implemented as len(set(pred) & set(gold)) / len(set(gold)))
+    2. ordered_overlap: percentage of elements at correct positions.
+    """
+
+    def __init__(self, verifier_config: Optional[VerifierConfig] = None) -> None:
+        super().__init__("finegrained", verifier_config=verifier_config, weight=1.0)
+
+    def extract_list(self, text: str) -> List[Any]:
+        """Tries to parse a python list from the text."""
+        try:
+            # Find the last bracketed content
+            start_index = text.rfind("[")
+            if start_index == -1:
+                return []
+            
+            end_index = text.find("]", start_index)
+            if end_index == -1:
+                return []
+                
+            candidate = text[start_index : end_index + 1]
+            parsed = ast.literal_eval(candidate)
+            if isinstance(parsed, list):
+                return parsed
+        except (ValueError, SyntaxError):
+            pass
+        return []
+
+    def __call__(
+        self, tokenized_prediction: List[int], prediction: str, label: Union[str, List[Any]], query: Optional[str] = None
+    ) -> VerificationResult:
+        # Parse prediction
+        pred_list = self.extract_list(prediction)
+        
+        # Parse label
+        if isinstance(label, str):
+            try:
+                gold_list = ast.literal_eval(label)
+                if not isinstance(gold_list, list):
+                    gold_list = [label]  # fallback
+            except (ValueError, SyntaxError):
+                gold_list = [label]  # fallback
+        elif isinstance(label, list):
+            gold_list = label
+        else:
+            gold_list = [label]
+
+        # Calculate Set Overlap
+        # Avoid division by zero
+        if not gold_list:
+            set_overlap = 0.0
+            ordered_overlap = 0.0
+        else:
+            # Cast elements to strings for consistent comparison (e.g. 1 vs '1')
+            # Actually, let's keep original types if possible, but fallback to str if needed?
+            # The prompt implies parsing "string output looks like python list".
+            # Let's assume elements are comparable.
+            
+            # Set Overlap
+            # Use multiset? "percentage of elements overlapped with the ground truth list"
+            # If gold is [1, 2, 2] and pred is [2], overlap is {2}.
+            # "one is converting it to a set" -> implies distinct elements.
+            pred_set = set(pred_list)
+            gold_set = set(gold_list)
+            if not gold_set:
+                set_overlap = 0.0 # Should cover this case
+            else:
+                set_overlap = len(pred_set & gold_set) / len(gold_set)
+
+            # Ordered Overlap
+            # "counting the percentage of the number that is overlapped with the ground truth list in the given order"
+            # Implies position-wise match.
+            matches = 0
+            for p, g in zip(pred_list, gold_list):
+                 if p == g:
+                     matches += 1
+            ordered_overlap = matches / len(gold_list)
+
+        scoring_mode = getattr(self.verifier_config, 'finegrained_scoring_mode', 'set_overlap')
+        
+        if scoring_mode == "ordered_overlap":
+            score = ordered_overlap
+        else:
+            score = set_overlap
+
+        return VerificationResult(
+            score=score,
+            additional_metrics={
+                "set_overlap": set_overlap,
+                "ordered_overlap": ordered_overlap
+            }
+        )
+
+    @classmethod
+    def get_config_class(cls) -> type:
+        return FinegrainedVerifierConfig
 
 
 def build_all_verifiers(args) -> Dict[str, VerifierFunction]:
