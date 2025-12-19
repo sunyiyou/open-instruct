@@ -84,6 +84,15 @@ class CodeVerifierConfig(VerifierConfig):
 
 
 @dataclass
+class CoderuntimeVerifierConfig(VerifierConfig):
+    code_api_url: str
+    code_max_execution_time: float
+    code_scoring_mode: str = "all_pass"  # "all_pass" or "pass_rate"
+    code_external_time_ceiling: float = 5.0  # external process ceiling in seconds
+
+
+
+@dataclass
 class ManufactoriaVerifierConfig(VerifierConfig):
     manufactoria_api_url: str
     manufactoria_max_execution_time: float
@@ -108,7 +117,7 @@ class VerificationResult:
     cost: float = 0.0
     reasoning: Optional[str] = None
     additional_metrics: Optional[Dict[str, float]] = None
-
+    details: Optional[dict] = None
 
 class VerifierFunction(ABC):
     """
@@ -1335,3 +1344,229 @@ async def cleanup_all_llm_judge_clients():
     Cleanup function to properly close all LLM judge clients before shutdown.
     """
     await LMJudgeVerifier.cleanup_all_clients()
+
+
+#############################################################################################
+#############################################################################################
+
+
+#############################################################################################
+#############################################################################################
+
+
+
+
+class CodeRuntimeVerifier(VerifierFunction):
+    """
+    Verifier that executes Python code against test cases using an external API.
+
+    The label should be a list of test cases or a JSON string representation of a list.
+    The API URL should be provided during initialization.
+    """
+
+    def __init__(self, verifier_config: CoderuntimeVerifierConfig) -> None:
+        super().__init__("coderuntime", verifier_config=verifier_config, weight=1.0)
+
+    def extract_python_code(self, model_output: str) -> str:
+        """Extract the last code block between ``` markers from the model output."""
+        # Find content between ``` markers
+        pattern = r"```(?:python)?(.*?)```"
+        matches = re.findall(pattern, model_output, re.DOTALL)
+
+        if not matches:
+            return model_output
+
+        # Return the last match, stripped of whitespace
+        return matches[-1].strip()
+
+    async def async_call(
+        self, tokenized_prediction: List[int], prediction: str, label: Any, query: Optional[str] = None
+    ) -> VerificationResult:
+        """
+        Asynchronously verify code execution against test cases.
+
+        Args:
+            tokenized_prediction: Unused tokenized representation
+            prediction: The model output containing Python code
+            label: List of test cases or JSON string representation of a list
+            query: Unused original query
+
+        Returns:
+            VerificationResult with score as the pass rate of test cases
+        """
+        # Parse label to get test cases
+        tests: Optional[List[str]] = None
+        if isinstance(label, str):
+            try:
+                parsed = json.loads(label)
+                if isinstance(parsed, list):
+                    tests = parsed
+            except json.JSONDecodeError:
+                logger.warning(f"Failed to parse label as JSON: {label}")
+        elif isinstance(label, list):
+            tests = label
+        elif isinstance(label, dict):
+            # Prefer explicit tests/ground_truth if provided in the dict
+            if isinstance(label.get('tests'), list):
+                tests = label.get('tests')  # type: ignore[assignment]
+            elif isinstance(label.get('ground_truth'), list):
+                tests = label.get('ground_truth')  # type: ignore[assignment]
+            # Will also attempt to use meta-driven dynamic tests below
+        else:
+            logger.warning(f"Unsupported label type: {type(label)}")
+            # Continue; may still assemble dynamic tests below
+
+        # Extract Python code from the model output
+        python_code = self.extract_python_code(prediction)
+
+        # Inject a timing wrapper around solve that enforces per-call max duration using perf_counter
+        # This ensures per-test max over solve() calls does not exceed the internal limit
+        internal_limit = float(self.verifier_config.code_max_execution_time)
+        timer_injection = (
+            "\n\n# ---- OMEGA timing injection (do not modify) ----\n"
+            "import time as __omega_time\n"
+            "__omega_solve_time_calls = []\n"
+            f"__omega_SOLVE_TIME_LIMIT = {internal_limit}\n"
+            "def __omega_wrap_solve(__omega_orig):\n"
+            "    def __omega_wrapped(*__omega_args, **__omega_kwargs):\n"
+            "        __omega_start = __omega_time.perf_counter()\n"
+            "        try:\n"
+            "            return __omega_orig(*__omega_args, **__omega_kwargs)\n"
+            "        finally:\n"
+            "            __omega_elapsed = __omega_time.perf_counter() - __omega_start\n"
+            "            __omega_solve_time_calls.append(__omega_elapsed)\n"
+            "            if __omega_elapsed > __omega_SOLVE_TIME_LIMIT:\n"
+            "                raise AssertionError(\"solve call exceeded time limit: \" + str(__omega_elapsed) + \"s > \" + str(__omega_SOLVE_TIME_LIMIT) + \"s\")\n"
+            "    return __omega_wrapped\n"
+            "try:\n"
+            "    solve\n"
+            "    solve = __omega_wrap_solve(solve)\n"
+            "except NameError:\n"
+            "    pass\n"
+            "# ---- end OMEGA timing injection ----\n"
+        )
+        instrumented_code = python_code + timer_injection
+
+        # For each provided test, append a per-test assertion that the max solve() call time <= internal_limit
+        instrumented_tests = None
+        if isinstance(tests, list):
+            suffix_assert = f"\nassert (max(__omega_solve_time_calls) if __omega_solve_time_calls else 0.0) <= {internal_limit}"
+            instrumented_tests = [
+                (t + suffix_assert) if isinstance(t, str) else t for t in tests
+            ]
+
+        # Build request payload with external process ceiling separate from internal timing limit
+        payload = {
+            "program": instrumented_code,
+            "tests": instrumented_tests if instrumented_tests is not None else tests,
+            "max_execution_time": float(self.verifier_config.code_external_time_ceiling),
+        }
+        
+        try:
+            # Make the request in a thread pool to keep it async
+            def make_request():
+                response = requests.post(
+                    self.verifier_config.code_api_url, json=payload, headers={"Content-Type": "application/json"}, timeout=300
+                )
+                response.raise_for_status()
+                return response.json()
+
+            result = await asyncio.to_thread(make_request)
+            passes = result.get("results", [])
+            runtimes = result.get("runtimes", [])
+            errors = result.get("errors", [])
+            pass_rate_score = sum(passes) / len(passes) if passes else 0.0
+            all_pass_score = 1.0 if pass_rate_score == 1.0 else 0.0
+            
+            # Choose the score based on the configured mode
+            scoring_mode = getattr(self.verifier_config, 'code_scoring_mode', 'all_pass')
+            if scoring_mode == "pass_rate":
+                final_score = pass_rate_score
+            else:  # default to "all_pass"
+                final_score = all_pass_score
+            
+            # Collect reasoning information
+            reasoning_parts = []
+            reasoning_parts.append(f"Scoring mode: {scoring_mode}")
+            reasoning_parts.append(f"Pass rate: {sum(passes)}/{len(passes)} ({pass_rate_score:.3f})")
+            reasoning_parts.append(f"All passed: {all_pass_score == 1.0}")
+            reasoning_parts.append(f"Final score ({scoring_mode}): {final_score:.3f}")
+            
+            reasoning = "; ".join(reasoning_parts)
+            # print(reasoning)
+            num_tests = len(tests) if isinstance(tests, list) else (len(passes) if isinstance(passes, list) else 0)
+            num_failed = int(num_tests - sum(passes)) if num_tests and isinstance(passes, list) else 0
+            first_error = None
+            if isinstance(errors, list):
+                for e in errors:
+                    if isinstance(e, dict) and e:
+                        first_error = e
+                        break
+            details = {
+                "passes": passes,
+                "runtimes": runtimes,
+                "errors": errors,
+                "first_error": first_error,
+                "num_failed": num_failed,
+                "num_tests": num_tests,
+                "max_execution_time": self.verifier_config.code_max_execution_time,  # internal limit
+                "external_time_ceiling": self.verifier_config.code_external_time_ceiling,
+            }
+            additional_metrics = {
+                "all_pass": all_pass_score,
+                "pass_rate": pass_rate_score
+            }
+            return VerificationResult(score=final_score, reasoning=reasoning, details=details, additional_metrics=additional_metrics)
+
+        except Exception as e:
+            error_msg = f"Error verifying code sample: {e}"
+            logger.warning(error_msg)
+            return VerificationResult(score=0.0, reasoning=error_msg)
+
+    def __call__(
+        self, tokenized_prediction: List[int], prediction: str, label: Any, query: Optional[str] = None
+    ) -> VerificationResult:
+        """
+        Synchronously verify code execution against test cases.
+        """
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                raise RuntimeError(
+                    "Cannot call synchronous __call__ method from within an async context. Use async_call instead."
+                )
+            else:
+                return asyncio.run(self.async_call(tokenized_prediction, prediction, label, query))
+        except RuntimeError as e:
+            # Check if this is due to interpreter shutdown
+            if "cannot schedule new futures after interpreter shutdown" in str(e):
+                logger.warning("Skipping Competition Code verification due to interpreter shutdown")
+                return VerificationResult(score=0.0, reasoning="Verification skipped due to shutdown")
+            # For other RuntimeErrors, try asyncio.run as before
+            try:
+                return asyncio.run(self.async_call(tokenized_prediction, prediction, label, query))
+            except Exception as nested_e:
+                logger.warning(f"Error verifying Competition Code sample during shutdown: {nested_e}")
+                return VerificationResult(score=0.0, reasoning=f"Verification failed: {nested_e}")
+        except Exception as e:
+            logger.warning(f"Error verifying Competition Code sample: {e}")
+            return VerificationResult(score=0.0, reasoning=f"Verification failed: {e}")
+
+    @classmethod
+    def get_config_class(cls) -> type:
+        """
+        Return the configuration class for this verifier.
+
+        Returns:
+            type: The VerifierConfig class or its subclass
+        """
+        return CoderuntimeVerifierConfig
+
+
+
+
+
+
+
+
+
